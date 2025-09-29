@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package vpn.control.v1;
+option go_package = "skywalkerVPN/api/control;controlpb";
+
+
+import "google/protobuf/timestamp.proto";
+
+// Types
+
+message User {
+  string id = 1;
+  string name = 2;
+  string driver_type = 3;
+  map<string, string> creds = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message Empty {}
+
+// Snapshot
+
+message Snapshot {
+  string version = 1;
+  repeated User users = 2;
+}
+
+message SnapshotRequest {
+  string agent_id = 1;
+  string version = 2;
+}
+
+// Task
+
+message TaskMeta {
+  string request_id = 1;   // business operation
+  uint64 seq = 2;   // agent ack for this
+}
+
+message UpsertUser {User user = 1;}
+message RemoveUser {string user_id = 1; string driver_type = 2;}
+message GetStatsAll {}
+message GetStatsUser {string user_id = 1;}
+
+message Task {
+  TaskMeta meta = 1;
+
+  oneof body {
+    UpsertUser upsert = 2;
+    RemoveUser remove = 3;
+    GetStatsAll all_stats = 4;
+    GetStatsUser user_stats = 5;
+  }
+}
+
+message UserStat {string user_id = 1; uint64 bytes_rx = 2; uint64 bytes_tx = 3;}
+message StatsAll {TaskMeta meta = 1; repeated UserStat users = 2; uint64 total_bytes_rx = 3; uint64 total_bytes_tx = 4;}
+message StatsUser {TaskMeta meta = 1; UserStat stat = 2;}
+
+message Ack {uint64 seq = 1;}
+message Nack {uint64 seq = 1; string error = 2;}
+
+
+// Handshake
+
+message AgentHello {
+  string instance_id = 1;
+  string hostname = 2;
+  string version = 3;
+  repeated string driver_types = 4; // xray, wg and other
+}
+
+message Welcome {
+  string agent_id = 1;
+  string message = 2;
+}
+
+// service
+
+message AgentToControl {
+  oneof msg {
+    AgentHello hello = 1;
+    Ack ack = 2;
+    Nack nack = 3;
+    StatsAll all_stats = 4;
+    StatsUser user_stats = 5;
+    Heartbeat heartbeat = 6;
+  }
+}
+
+message ControlToAgent {
+  oneof msg {
+    Welcome welcome = 1;
+    Task task = 2;
+  }
+}
+
+message Heartbeat {
+  string  agent_id = 1;
+  uint32  uptime_seconds = 2;
+}
+
+service ControlPlane {
+  // Agent first opened stream and send AgentHello,
+  // Server response welcome, and only after this start send tasks
+  rpc Workstream(stream AgentToControl) returns (stream ControlToAgent);
+
+  // Agent pulling snapshot
+  rpc GetSnapshot(SnapshotRequest) returns (Snapshot);
+}
