@@ -71,7 +71,7 @@ func initSQLiteSchema(ctx context.Context, db *sql.DB) error {
 		if _, err := tx.ExecContext(ctx, `
 			CREATE TABLE IF NOT EXISTS meta (
 				key   TEXT PRIMARY KEY,
-				value TEXT NOT NULL
+				value ITEGER NOT NULL
 			);
 		`); err != nil {
 			return fmt.Errorf("create meta: %w", err)
@@ -94,6 +94,12 @@ func initSQLiteSchema(ctx context.Context, db *sql.DB) error {
 			CREATE INDEX IF NOT EXISTS idx_users_driver_type ON users(driver_type);
 		`); err != nil {
 			return fmt.Errorf("create idx_users_driver_type: %w", err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			CREATE INDEX IF NOT EXISTS idx_users_expired_at ON users(expires_at);
+		`); err != nil {
+			return fmt.Errorf("create idx_users_expired_at: %w", err)
 		}
 
 		if _, err := tx.ExecContext(ctx, `
