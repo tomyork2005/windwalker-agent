@@ -1,8 +1,8 @@
 package service
 
 import (
+	controlpb "agent/api/control"
 	"agent/internal/domain"
-	driver "agent/internal/drivers"
 	"context"
 	"fmt"
 )
@@ -18,10 +18,23 @@ type TxManager interface {
 	WithTx(context.Context, func(ctx context.Context) error) error
 }
 
+type DriverMultiplexer interface {
+	Upsert(ctx context.Context, user domain.User) error
+	Remove(ctx context.Context, userID string, driverType string) error
+}
+
 type Service struct {
 	storage     Storage
 	tx          TxManager
-	multiplexer driver.Multiplexer
+	multiplexer DriverMultiplexer
+}
+
+func NewAgentService(storage Storage, tx TxManager, multiplexer DriverMultiplexer) *Service {
+	return &Service{
+		storage:     storage,
+		tx:          tx,
+		multiplexer: multiplexer,
+	}
 }
 
 func (s *Service) UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) error {
@@ -85,4 +98,11 @@ func (s *Service) RemoveUser(ctx context.Context, meta *domain.Meta, userID stri
 		}
 		return nil
 	})
+}
+
+func (s *Service) GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAll, error) {
+	return nil, nil
+}
+func (s *Service) GetStatsUser(ctx context.Context, meta *domain.Meta, userID string) (*controlpb.StatsUser, error) {
+	return nil, nil
 }

@@ -1,0 +1,30 @@
+env: "prod"
+
+transport_grpc:
+  address: "123"                       # gRPC address control_plane
+  agent_id: ""                      # welcome from server
+  instance_id: ""                   # generated in every start
+  region: "FIN"                     # ISO alpha-3 country code
+  version: "1.0.0"                  # agent version
+  driver_types: [ "xray" ]
+
+  heartbeat_period: 20s
+  send_queue_size: 128
+  reconnect_min: 500ms
+  reconnect_max: 10s
+  dial_timeout: 5s
+
+driver_xray:
+  service_name: xray               # systemd unit
+  api_addr: 127.0.0.1:10085        # xray grpc api address
+  inbound_tag: vless-in
+  protocol: vless                  # vless | vmess
+  vless_flow: xtls-rprx-vision
+  op_timeout: 3s                   # deadline on RPC
+
+storage_sqlite:
+  path: ./data/agent.db
+  busy_timeout: 5s
+  wal: true
+  synchronous_full: false
+  foreign_keys: true

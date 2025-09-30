@@ -8,18 +8,18 @@ import (
 const contextTxKey = "contextTx"
 
 type TxManager struct {
-	DB *sql.DB
+	db *sql.DB
 }
 
 func NewTxManager(db *sql.DB) *TxManager {
-	return &TxManager{DB: db}
+	return &TxManager{db: db}
 }
 
 func (m *TxManager) WithTx(ctx context.Context, fn func(ctx context.Context) error) error {
 	if tx := TxFromContext(ctx); tx != nil {
 		return fn(ctx) // already in tx
 	}
-	tx, err := m.DB.BeginTx(ctx, nil)
+	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}

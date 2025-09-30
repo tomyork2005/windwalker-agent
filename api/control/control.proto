@@ -9,8 +9,8 @@ import "google/protobuf/timestamp.proto";
 // Types
 
 message User {
-  string id = 1;
-  string name = 2;
+  string id = 1; // tech id, every tg & driver_type --> unique_id
+  string name = 2; // business (like tg name, etc...)
   string driver_type = 3;
   map<string, string> creds = 4;
   google.protobuf.Timestamp expires_at = 5;
@@ -65,7 +65,7 @@ message Nack {uint64 seq = 1; string error = 2;}
 
 message AgentHello {
   string instance_id = 1;
-  string hostname = 2;
+  string region = 2;
   string version = 3;
   repeated string driver_types = 4; // xray, wg and other
 }

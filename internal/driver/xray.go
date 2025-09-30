@@ -3,6 +3,7 @@ package driver
 // Driver for Xray, Xray gRPC API working with user`s email, here user`s email == user`s uuid
 
 import (
+	"agent/internal/config"
 	"context"
 	"errors"
 	"fmt"
@@ -21,7 +22,6 @@ import (
 	"github.com/xtls/xray-core/proxy/vmess"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
@@ -31,21 +31,11 @@ var _ Driver = (*XrayDriver)(nil)
 const (
 	vlessProtocol = "vless"
 	vmessProtocol = "vmess"
-	actualFlow    = "xtls-rprx-vision"
 )
-
-type XrayOptions struct {
-	ServiceName string
-	APIAddr     string
-	InboundTag  string
-	Protocol    string
-	GRPCCreds   credentials.TransportCredentials
-	OpTimeout   time.Duration
-}
 
 type XrayDriver struct {
 	name string
-	cfg  XrayOptions
+	cfg  config.XrayConfig
 
 	mu   sync.Mutex
 	conn *grpc.ClientConn
@@ -54,10 +44,11 @@ type XrayDriver struct {
 	stats   statscmd.StatsServiceClient
 }
 
-func NewXrayDriver(options XrayOptions) *XrayDriver {
+func NewXrayDriver(options config.XrayConfig) *XrayDriver {
 	if options.OpTimeout == 0 {
 		options.OpTimeout = time.Second * 3
 	}
+
 	return &XrayDriver{
 		name: "xray",
 		cfg:  options,
@@ -211,12 +202,17 @@ func (d *XrayDriver) ensureConn(ctx context.Context) error {
 		return nil
 	}
 
+	// todo GRPCCreds  credentials.TransportCredentials
+
+	/*	var opts []grpc.DialOption
+		if d.cfg.GRPCCreds != nil {
+			opts = append(opts, grpc.WithTransportCredentials(d.cfg.GRPCCreds))
+		} else {
+			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		}*/
+
 	var opts []grpc.DialOption
-	if d.cfg.GRPCCreds != nil {
-		opts = append(opts, grpc.WithTransportCredentials(d.cfg.GRPCCreds))
-	} else {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	}
+	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 
 	conn, err := grpc.NewClient(d.cfg.APIAddr, opts...)
 	if err != nil {
@@ -245,7 +241,7 @@ func (d *XrayDriver) toXrayUser(user domain.User) (*protocol.User, error) {
 		}
 		acc := &vless.Account{
 			Id:   user.ID,
-			Flow: actualFlow,
+			Flow: d.cfg.VlessFlow,
 		}
 		return &protocol.User{
 			Email:   email,

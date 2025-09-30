@@ -2,6 +2,7 @@ package transport
 
 import (
 	controlpb "agent/api/control"
+	"agent/internal/config"
 	"context"
 	"errors"
 	"fmt"
@@ -13,23 +14,8 @@ import (
 	"time"
 )
 
-type Config struct {
-	Address     string
-	AgentID     string
-	InstanceID  string
-	Hostname    string
-	Version     string
-	DriverTypes []string
-
-	HeartbeatPeriod time.Duration
-	SendQueueSize   int
-	ReconnectMin    time.Duration
-	ReconnectMax    time.Duration
-	DialTimeout     time.Duration
-}
-
 type Client struct {
-	cfg    Config
+	cfg    config.TransportGrpcConfig
 	client *grpc.ClientConn
 	api    controlpb.ControlPlaneClient
 
@@ -37,7 +23,7 @@ type Client struct {
 	start time.Time
 }
 
-func NewClient(cfg Config) *Client {
+func NewClient(cfg config.TransportGrpcConfig) *Client {
 	if cfg.HeartbeatPeriod == 0 {
 		cfg.HeartbeatPeriod = 20 * time.Second
 	}
@@ -141,7 +127,7 @@ func (c *Client) runOnce(ctx context.Context, h TaskHandlers) error {
 		Msg: &controlpb.AgentToControl_Hello{
 			Hello: &controlpb.AgentHello{
 				InstanceId:  c.cfg.InstanceID,
-				Hostname:    c.cfg.Hostname,
+				Region:      c.cfg.Region,
 				Version:     c.cfg.Version,
 				DriverTypes: c.cfg.DriverTypes,
 			},
@@ -176,14 +162,16 @@ func (c *Client) writer(ctx context.Context, stream controlpb.ControlPlane_Works
 				return err
 			}
 		case <-hb.C:
-			_ = stream.Send(&controlpb.AgentToControl{
+			if err := stream.Send(&controlpb.AgentToControl{
 				Msg: &controlpb.AgentToControl_Heartbeat{
 					Heartbeat: &controlpb.Heartbeat{
 						AgentId:       c.cfg.AgentID,
 						UptimeSeconds: uint32(time.Since(c.start) / time.Second),
 					},
 				},
-			})
+			}); err != nil {
+				return err
+			}
 		}
 	}
 }

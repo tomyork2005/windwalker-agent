@@ -1,54 +1,39 @@
 package main
 
 import (
-	badger "github.com/dgraph-io/badger/v4"
-	"log"
-	"time"
+	"agent/internal/driver"
+	"agent/internal/service"
+	"agent/internal/storage"
+	"agent/internal/transport"
+	"context"
+	"os"
+
+	"agent/internal/config"
 )
 
 func main() {
-	db, err := badger.Open(badger.DefaultOptions("tmp/badger"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
+	ctx := context.Background()
 
-	err = db.Update(func(txn *badger.Txn) error {
-		e := badger.NewEntry([]byte("user:123"), []byte("premium"))
-		e.WithTTL(10 * time.Second) // ключ «живёт» 10 секунд
-		return txn.SetEntry(e)
-	})
+	cfg := config.MustLoadConfig()
+
+	sqliteStorage, err := storage.NewSQLiteStorage(ctx, cfg.SQLiteConfig)
 	if err != nil {
-		log.Fatal(err)
+		os.Exit(1)
 	}
 
-	err = db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get([]byte("user:123"))
-		if err != nil {
-			return err
-		}
-		val, err := item.ValueCopy(nil)
-		if err != nil {
-			return err
-		}
-		log.Println("Значение:", string(val))
-		return nil
-	})
+	xrayDriver := driver.NewXrayDriver(cfg.XrayConfig)
+
+	err = xrayDriver.Start(ctx)
 	if err != nil {
-		log.Println("Ошибка чтения:", err)
+		os.Exit(1)
 	}
 
-	time.Sleep(12 * time.Second)
+	multiplexer := driver.NewMultiplexer(xrayDriver)
+	agentService := service.NewAgentService(sqliteStorage, sqliteStorage.GetTxManager(), multiplexer)
 
-	err = db.View(func(txn *badger.Txn) error {
-		_, err := txn.Get([]byte("user:123"))
-		if err == badger.ErrKeyNotFound {
-			log.Println("Ключ протух и удалён!")
-			return nil
-		}
-		return err
-	})
+	transportClient := transport.NewClient(cfg.TransportGrpcConfig)
+	err = transportClient.Run(ctx, agentService)
 	if err != nil {
-		log.Fatal(err)
+		os.Exit(1)
 	}
 }

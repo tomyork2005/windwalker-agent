@@ -1,17 +1,21 @@
 package storage
 
 import (
+	"agent/internal/domain"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 type Storage struct {
-	db *sql.DB
+	db        *sql.DB
+	txManager *TxManager
 }
 
-// tx or db, to avoid duplicating code
+// interface and func ex --> to avoid duplicating code
 
 type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
@@ -24,6 +28,10 @@ func (s *Storage) ex(ctx context.Context) execer {
 		return tx
 	}
 	return s.db
+}
+
+func (s *Storage) GetTxManager() *TxManager {
+	return s.txManager
 }
 
 func (s *Storage) GetLastAppliedSeq(ctx context.Context) (uint64, error) {
@@ -46,5 +54,30 @@ func (s *Storage) SetLastAppliedSeq(ctx context.Context, seq uint64) error {
 		INSERT INTO meta(key,value) VALUES('last_applied_seq', ?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value
 	`, fmt.Sprint(seq))
+	return err
+}
+
+func (s *Storage) UpsertUser(ctx context.Context, u domain.User) error {
+	b, _ := json.Marshal(u.Creds)
+	var exp any
+	if !u.ExpiresAt.IsZero() {
+		exp = u.ExpiresAt.Unix()
+	}
+
+	_, err := s.ex(ctx).ExecContext(ctx, `
+		INSERT INTO users(id,name,driver_type,creds_json,expires_at,updated_at)
+		VALUES(?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+		  name=excluded.name,
+		  driver_type=excluded.driver_type,
+		  creds_json=excluded.creds_json,
+		  expires_at=excluded.expires_at,
+		  updated_at=excluded.updated_at
+	`, u.ID, u.Name, u.DriverType, string(b), exp, time.Now().Unix())
+	return err
+}
+
+func (s *Storage) RemoveUser(ctx context.Context, userID string) error {
+	_, err := s.ex(ctx).ExecContext(ctx, `DELETE FROM users WHERE id=?`, userID)
 	return err
 }
