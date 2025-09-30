@@ -3,6 +3,7 @@ package transport
 import (
 	controlpb "agent/api/control"
 	"agent/internal/domain"
+	"agent/internal/logx"
 	"context"
 	"errors"
 	"fmt"
@@ -27,20 +28,27 @@ func RouteTask(
 		return fmt.Errorf("transport: TaskHandlers is required")
 	}
 	meta := fromProtoToServiceMeta(task.GetMeta())
+	log := logx.With("component", "transport", "seq", meta.Seq)
 
 	switch body := task.Body.(type) {
 	case *controlpb.Task_Upsert:
+		log.Info("task received", "op", "UPSERT", "driver_type", body.Upsert.GetUser().GetDriverType(), "user_id", body.Upsert.GetUser().GetId())
+
 		if err := h.UpsertUser(ctx, meta, fromProtoToServiceUser(body.Upsert.GetUser())); err != nil {
 			return sendNack(send, meta.Seq, err)
 		}
 		return sendAck(send, meta.Seq)
 	case *controlpb.Task_Remove:
+		log.Info("task received", "op", "REMOVE", "driver_type", body.Remove.GetDriverType(), "user_id", body.Remove.GetUserId())
+
 		if err := h.RemoveUser(ctx, meta, body.Remove.GetUserId(), body.Remove.GetDriverType()); err != nil {
 			return sendNack(send, meta.Seq, err)
 		}
 		return sendAck(send, meta.Seq)
 
 	case *controlpb.Task_AllStats:
+		log.Info("task received", "op", "GET_STATS_ALL")
+
 		resp, err := h.GetStatsAll(ctx, meta)
 		if err != nil {
 			return sendNack(send, meta.Seq, err)
@@ -53,6 +61,8 @@ func RouteTask(
 		return sendAck(send, meta.Seq)
 
 	case *controlpb.Task_UserStats:
+		log.Info("task received", "op", "GET_STATS_USER", "user_id", body.UserStats.GetUserId())
+
 		resp, err := h.GetStatsUser(ctx, meta, body.UserStats.GetUserId())
 		if err != nil {
 			return sendNack(send, meta.Seq, err)
@@ -100,6 +110,9 @@ func fromProtoToServiceUser(proto *controlpb.User) *domain.User {
 }
 
 func fromProtoToServiceMeta(meta *controlpb.TaskMeta) *domain.Meta {
+	if meta == nil {
+		return &domain.Meta{}
+	}
 	return &domain.Meta{
 		RequestID: meta.GetRequestId(),
 		Seq:       meta.GetSeq(),

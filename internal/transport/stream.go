@@ -3,6 +3,7 @@ package transport
 import (
 	controlpb "agent/api/control"
 	"agent/internal/config"
+	"agent/internal/logx"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +11,6 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
-	"log"
 	"time"
 )
 
@@ -187,10 +187,13 @@ func (c *Client) reader(ctx context.Context, stream controlpb.ControlPlane_Works
 		case *controlpb.ControlToAgent_Welcome:
 			if m.Welcome.GetAgentId() != "" {
 				c.cfg.AgentID = m.Welcome.GetAgentId()
+				aid := m.Welcome.GetAgentId()
+				logx.Set("agent_id", aid)
+				logx.Info("welcome received", "agent_id", aid)
 			}
 		case *controlpb.ControlToAgent_Task:
 			if err := RouteTask(ctx, h, m.Task, c.Send); err != nil {
-				log.Printf(fmt.Sprintf("Error on route task seg - %v, : %v", m.Task.GetMeta(), err)) // TODO different log
+				logx.Error(fmt.Sprintf("Error on route task seg - %v, : %v", m.Task.GetMeta(), err))
 			}
 		}
 	}
