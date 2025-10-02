@@ -36,7 +36,7 @@ func main() {
 		defer cancel()
 		_ = xrayDriver.Stop(shCtx)
 	}()
-	logx.Info("xray started")
+	logx.Info("xray started - name - ", xrayDriver.Name())
 
 	multiplexer := driver.NewMultiplexer(xrayDriver)
 	agentService := service.NewAgentService(sqliteStorage, sqliteStorage.GetTxManager(), multiplexer)

@@ -84,7 +84,7 @@ func (s *Service) RemoveUser(ctx context.Context, meta *domain.Meta, userID stri
 			return nil
 		}
 
-		if err := s.multiplexer.Remove(ctx, driverType, userID); err != nil {
+		if err := s.multiplexer.Remove(ctx, userID, driverType); err != nil {
 			return fmt.Errorf("driver remove: %w", err)
 		}
 		if err := s.storage.RemoveUser(ctx, userID); err != nil {
