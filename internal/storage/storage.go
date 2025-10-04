@@ -81,3 +81,7 @@ func (s *Storage) RemoveUser(ctx context.Context, userID string) error {
 	_, err := s.ex(ctx).ExecContext(ctx, `DELETE FROM users WHERE id=?`, userID)
 	return err
 }
+
+func (s *Storage) Close() error {
+	return s.db.Close()
+}

@@ -23,6 +23,12 @@ func main() {
 		logx.Error("storage start failed", "err", err)
 		os.Exit(1)
 	}
+	defer func() {
+		err := sqliteStorage.Close()
+		if err != nil {
+			logx.Error("Failed to close sqlite storage")
+		}
+	}()
 	logx.Info("storage started")
 
 	xrayDriver := driver.NewXrayDriver(cfg.XrayConfig)

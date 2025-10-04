@@ -20,11 +20,11 @@ type TaskHandlers interface {
 
 func RouteTask(
 	ctx context.Context,
-	h TaskHandlers,
+	handler TaskHandlers,
 	task *controlpb.Task,
 	send func(*controlpb.AgentToControl) error,
 ) error {
-	if h == nil {
+	if handler == nil {
 		return fmt.Errorf("transport: TaskHandlers is required")
 	}
 	meta := fromProtoToServiceMeta(task.GetMeta())
@@ -34,14 +34,14 @@ func RouteTask(
 	case *controlpb.Task_Upsert:
 		log.Info("task received", "op", "UPSERT", "driver_type", body.Upsert.GetUser().GetDriverType(), "user_id", body.Upsert.GetUser().GetId())
 
-		if err := h.UpsertUser(ctx, meta, fromProtoToServiceUser(body.Upsert.GetUser())); err != nil {
+		if err := handler.UpsertUser(ctx, meta, fromProtoToServiceUser(body.Upsert.GetUser())); err != nil {
 			return sendNack(send, meta.Seq, err)
 		}
 		return sendAck(send, meta.Seq)
 	case *controlpb.Task_Remove:
 		log.Info("task received", "op", "REMOVE", "driver_type", body.Remove.GetDriverType(), "user_id", body.Remove.GetUserId())
 
-		if err := h.RemoveUser(ctx, meta, body.Remove.GetUserId(), body.Remove.GetDriverType()); err != nil {
+		if err := handler.RemoveUser(ctx, meta, body.Remove.GetUserId(), body.Remove.GetDriverType()); err != nil {
 			return sendNack(send, meta.Seq, err)
 		}
 		return sendAck(send, meta.Seq)
@@ -49,7 +49,7 @@ func RouteTask(
 	case *controlpb.Task_AllStats:
 		log.Info("task received", "op", "GET_STATS_ALL")
 
-		resp, err := h.GetStatsAll(ctx, meta)
+		resp, err := handler.GetStatsAll(ctx, meta)
 		if err != nil {
 			return sendNack(send, meta.Seq, err)
 		}
@@ -63,7 +63,7 @@ func RouteTask(
 	case *controlpb.Task_UserStats:
 		log.Info("task received", "op", "GET_STATS_USER", "user_id", body.UserStats.GetUserId())
 
-		resp, err := h.GetStatsUser(ctx, meta, body.UserStats.GetUserId())
+		resp, err := handler.GetStatsUser(ctx, meta, body.UserStats.GetUserId())
 		if err != nil {
 			return sendNack(send, meta.Seq, err)
 		}

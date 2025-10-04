@@ -3,6 +3,7 @@ package service
 import (
 	controlpb "agent/api/control"
 	"agent/internal/domain"
+	"agent/internal/logx"
 	"context"
 	"fmt"
 )
@@ -39,63 +40,91 @@ func NewAgentService(storage Storage, tx TxManager, multiplexer DriverMultiplexe
 
 func (s *Service) UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) error {
 	if meta == nil || user == nil || user.ID == "" {
-		return fmt.Errorf("invalid upsert payload")
+		return fmt.Errorf("invalid upsert request payload")
 	}
+
+	log := logx.With(
+		"component", "service",
+		"op", "upsert",
+		"seq", meta.Seq,
+		"user_id", user.ID,
+	)
+	log.Debug("starting user upsert")
 
 	return s.tx.WithTx(ctx, func(ctx context.Context) error {
 		last, err := s.storage.GetLastAppliedSeq(ctx)
 		if err != nil {
-			return err
+			log.Error("storage read failed", "err", err)
+			return fmt.Errorf("storage get last applied seq: %w", err)
 		}
 		if meta != nil && meta.Seq != 0 && meta.Seq <= last {
-			// if duplicate, nothing to do --> just sending ack
+			log.Info("skip duplicated task")
 			return nil
 		}
 
 		if err := s.multiplexer.Upsert(ctx, *user); err != nil {
-			return fmt.Errorf("driver upsert: %w", err)
+			log.Error("driver upsert failed", "err", err)
+			return fmt.Errorf("driver upsert user: %w", err)
 		}
 		if err := s.storage.UpsertUser(ctx, *user); err != nil {
-			return fmt.Errorf("db upsert: %w", err)
+			log.Error("storage upsert failed", "err", err)
+			return fmt.Errorf("storage upsert user: %w", err)
 		}
 
 		if meta != nil && meta.Seq != 0 {
 			if err := s.storage.SetLastAppliedSeq(ctx, meta.Seq); err != nil {
-				return err
+				log.Error("storage set last seq failed", "err", err)
+				return fmt.Errorf("storage set last applied seq: %w", err)
 			}
 		}
 
+		log.Info("user upserted successfully")
 		return nil
 	})
 }
 
 func (s *Service) RemoveUser(ctx context.Context, meta *domain.Meta, userID string, driverType string) error {
 	if meta == nil || userID == "" || driverType == "" {
-		return fmt.Errorf("invalid remove payload")
+		return fmt.Errorf("invalid remove request payload")
 	}
+
+	log := logx.With(
+		"component", "service",
+		"op", "remove",
+		"seq", meta.Seq,
+		"user_id", userID,
+		"driverType", driverType,
+	)
+	log.Debug("starting user remove")
 
 	return s.tx.WithTx(ctx, func(ctx context.Context) error {
 		last, err := s.storage.GetLastAppliedSeq(ctx)
 		if err != nil {
-			return err
+			log.Error("storage read failed", "err", err)
+			return fmt.Errorf("storage get last applied seq: %w", err)
 		}
 		if meta != nil && meta.Seq != 0 && meta.Seq <= last {
-			// if duplicate, nothing to do --> just sending ack
+			log.Info("skip duplicated task")
 			return nil
 		}
 
 		if err := s.multiplexer.Remove(ctx, userID, driverType); err != nil {
-			return fmt.Errorf("driver remove: %w", err)
+			log.Error("driver remove failed", "err", err)
+			return fmt.Errorf("driver remove user: %w", err)
 		}
 		if err := s.storage.RemoveUser(ctx, userID); err != nil {
-			return fmt.Errorf("db remove: %w", err)
+			log.Error("storage remove failed", "err", err)
+			return fmt.Errorf("storage remove user: %w", err)
 		}
 
 		if meta != nil && meta.Seq != 0 {
 			if err := s.storage.SetLastAppliedSeq(ctx, meta.Seq); err != nil {
-				return err
+				log.Error("storage set last seq failed", "err", err)
+				return fmt.Errorf("storage set last applied seq: %w", err)
 			}
 		}
+		log.Info("user upserted successfully")
+
 		return nil
 	})
 }
