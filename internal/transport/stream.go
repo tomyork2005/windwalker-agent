@@ -1,12 +1,13 @@
 package transport
 
 import (
-	controlpb "agent/api/control"
-	"agent/internal/config"
-	"agent/internal/logx"
 	"context"
 	"errors"
 	"fmt"
+
+	controlpb "agent/api/control"
+	"agent/internal/config"
+	"agent/internal/logx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"

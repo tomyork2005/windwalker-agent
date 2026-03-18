@@ -1,0 +1,20 @@
+[Unit]
+Description=Skywalker VPN Agent
+Wants=network-online.target
+After=network-online.target xray.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=CONFIG_PATH=/etc/skywalker-agent/config.yaml
+WorkingDirectory=/var/lib/skywalker-agent
+ExecStart=/usr/local/bin/skywalker-agent
+Restart=always
+RestartSec=3
+TimeoutStartSec=30
+TimeoutStopSec=15
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
