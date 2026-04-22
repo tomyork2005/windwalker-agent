@@ -9,13 +9,13 @@ import (
 	"fmt"
 )
 
-var errUnknownTask = errors.New("Unknown task")
+var errUnknownTask = errors.New("unknown task")
 
 type TaskHandlers interface {
-	UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) error
+	UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) (*controlpb.UserCreds, error)
 	RemoveUser(ctx context.Context, meta *domain.Meta, userID string, driverType string) error
-	GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAll, error)
-	GetStatsUser(ctx context.Context, meta *domain.Meta, userID string) (*controlpb.StatsUser, error)
+	GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAllResponse, error)
+	GetStatsUser(ctx context.Context, meta *domain.Meta, userID string) (*controlpb.StatsUserResponse, error)
 }
 
 func RouteTask(
@@ -32,74 +32,98 @@ func RouteTask(
 
 	switch body := task.Body.(type) {
 	case *controlpb.Task_Upsert:
-		log.Info("task received", "op", "UPSERT", "driver_type", body.Upsert.GetUser().GetDriverType(), "user_id", body.Upsert.GetUser().GetId())
+		log.Info("task received",
+			"op", "UPSERT",
+			"driver_type", body.Upsert.GetUser().GetDriverType(),
+			"user_id", body.Upsert.GetUser().GetId(),
+		)
 
-		if err := handler.UpsertUser(ctx, meta, fromProtoToServiceUser(body.Upsert.GetUser())); err != nil {
-			return sendNack(send, meta.Seq, err)
+		creds, err := handler.UpsertUser(ctx, meta, fromProtoToServiceUser(body.Upsert.GetUser()))
+		if err != nil {
+			return sendResp(send, meta.Seq, &controlpb.Response_Error{
+				Error: &controlpb.Error{Error: err.Error()},
+			})
 		}
-		return sendAck(send, meta.Seq)
+		return sendResp(send, meta.Seq, &controlpb.Response_Upsert{
+			Upsert: &controlpb.UserUpsertResponse{Creds: creds},
+		})
+
 	case *controlpb.Task_Remove:
-		log.Info("task received", "op", "REMOVE", "driver_type", body.Remove.GetDriverType(), "user_id", body.Remove.GetUserId())
+		log.Info("task received",
+			"op", "REMOVE",
+			"driver_type", body.Remove.GetDriverType(),
+			"user_id", body.Remove.GetUserId(),
+		)
 
 		if err := handler.RemoveUser(ctx, meta, body.Remove.GetUserId(), body.Remove.GetDriverType()); err != nil {
-			return sendNack(send, meta.Seq, err)
+			return sendResp(send, meta.Seq, &controlpb.Response_Error{
+				Error: &controlpb.Error{Error: err.Error()},
+			})
 		}
-		return sendAck(send, meta.Seq)
+		return sendResp(send, meta.Seq, &controlpb.Response_Remove{
+			Remove: &controlpb.UserRemoveResponse{},
+		})
 
-	case *controlpb.Task_AllStats:
-		log.Info("task received", "op", "GET_STATS_ALL")
+	case *controlpb.Task_StatsAll:
+		log.Info("task received", "op", "STATS_ALL")
 
 		resp, err := handler.GetStatsAll(ctx, meta)
 		if err != nil {
-			return sendNack(send, meta.Seq, err)
+			return sendResp(send, meta.Seq, &controlpb.Response_Error{
+				Error: &controlpb.Error{Error: err.Error()},
+			})
 		}
-		if err := send(&controlpb.AgentToControl{
-			Msg: &controlpb.AgentToControl_AllStats{AllStats: resp},
-		}); err != nil {
-			return err
-		}
-		return sendAck(send, meta.Seq)
+		return sendResp(send, meta.Seq, &controlpb.Response_StatsAll{StatsAll: resp})
 
-	case *controlpb.Task_UserStats:
-		log.Info("task received", "op", "GET_STATS_USER", "user_id", body.UserStats.GetUserId())
+	case *controlpb.Task_StatsUser:
+		log.Info("task received", "op", "STATS_USER", "user_id", body.StatsUser.GetUserId())
 
-		resp, err := handler.GetStatsUser(ctx, meta, body.UserStats.GetUserId())
+		resp, err := handler.GetStatsUser(ctx, meta, body.StatsUser.GetUserId())
 		if err != nil {
-			return sendNack(send, meta.Seq, err)
+			return sendResp(send, meta.Seq, &controlpb.Response_Error{
+				Error: &controlpb.Error{Error: err.Error()},
+			})
 		}
-		if err := send(&controlpb.AgentToControl{
-			Msg: &controlpb.AgentToControl_UserStats{UserStats: resp},
-		}); err != nil {
-			return err
-		}
-		return sendAck(send, meta.Seq)
+		return sendResp(send, meta.Seq, &controlpb.Response_StatsUser{StatsUser: resp})
 
 	default:
-		return sendNack(send, meta.Seq, errUnknownTask)
+		return sendResp(send, meta.Seq, &controlpb.Response_Error{
+			Error: &controlpb.Error{Error: errUnknownTask.Error()},
+		})
 	}
-
 }
 
-func sendAck(send func(*controlpb.AgentToControl) error, seq uint64) error {
+// sendResp wraps a oneof body variant (Response_Upsert / _Remove / _StatsAll /
+// _StatsUser / _Error) into a Response with Meta and ships it via the send queue.
+// The body is one of the generated oneof wrapper structs — we rely on them
+// implementing the unexported isResponse_Body interface, which is why we
+// type-switch here instead of taking a typed parameter.
+func sendResp(send func(*controlpb.AgentToControl) error, seq uint64, body any) error {
+	resp := &controlpb.Response{Meta: &controlpb.TaskMeta{Seq: seq}}
+	switch b := body.(type) {
+	case *controlpb.Response_Upsert:
+		resp.Body = b
+	case *controlpb.Response_Remove:
+		resp.Body = b
+	case *controlpb.Response_StatsAll:
+		resp.Body = b
+	case *controlpb.Response_StatsUser:
+		resp.Body = b
+	case *controlpb.Response_Error:
+		resp.Body = b
+	default:
+		return fmt.Errorf("transport: unsupported response body %T", body)
+	}
 	return send(&controlpb.AgentToControl{
-		Msg: &controlpb.AgentToControl_Ack{Ack: &controlpb.Ack{Seq: seq}},
-	})
-}
-
-func sendNack(send func(*controlpb.AgentToControl) error, seq uint64, err error) error {
-	return send(&controlpb.AgentToControl{
-		Msg: &controlpb.AgentToControl_Nack{
-			Nack: &controlpb.Nack{Seq: seq, Error: err.Error()},
-		},
+		Msg: &controlpb.AgentToControl_Resp{Resp: resp},
 	})
 }
 
 func fromProtoToServiceUser(proto *controlpb.User) *domain.User {
 	u := &domain.User{
 		ID:         proto.GetId(),
-		Name:       proto.GetName(),
+		AccountID:  proto.GetAccountId(),
 		DriverType: proto.GetDriverType(),
-		Creds:      proto.GetCreds(),
 	}
 
 	if ts := proto.GetExpiresAt(); ts != nil && ts.CheckValid() == nil {

@@ -4,7 +4,6 @@ import (
 	"agent/internal/domain"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -58,22 +57,20 @@ func (s *Storage) SetLastAppliedSeq(ctx context.Context, seq uint64) error {
 }
 
 func (s *Storage) UpsertUser(ctx context.Context, u domain.User) error {
-	b, _ := json.Marshal(u.Creds)
 	var exp any
 	if !u.ExpiresAt.IsZero() {
 		exp = u.ExpiresAt.Unix()
 	}
 
 	_, err := s.ex(ctx).ExecContext(ctx, `
-		INSERT INTO users(id,name,driver_type,creds_json,expires_at,updated_at)
-		VALUES(?,?,?,?,?,?)
+		INSERT INTO users(id,account_id,driver_type,expires_at,updated_at)
+		VALUES(?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
-		  name=excluded.name,
+		  account_id=excluded.account_id,
 		  driver_type=excluded.driver_type,
-		  creds_json=excluded.creds_json,
 		  expires_at=excluded.expires_at,
 		  updated_at=excluded.updated_at
-	`, u.ID, u.Name, u.DriverType, string(b), exp, time.Now().Unix())
+	`, u.ID, u.AccountID, u.DriverType, exp, time.Now().Unix())
 	return err
 }
 

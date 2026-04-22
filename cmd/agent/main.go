@@ -15,7 +15,6 @@ import (
 
 func main() {
 	ctx := context.Background()
-
 	cfg := config.MustLoadConfig()
 
 	sqliteStorage, err := storage.NewSQLiteStorage(ctx, cfg.SQLiteConfig)

@@ -1,90 +1,42 @@
 syntax = "proto3";
 
 package vpn.control.v1;
-option go_package = "skywalkerVPN/api/control;controlpb";
+option go_package = "control/api/control;controlpb";
 
 
 import "google/protobuf/timestamp.proto";
 
-// Types
+// General Types
 
 message User {
   string id = 1; // tech id, every tg & driver_type --> unique_id
-  string name = 2; // business (like tg name, etc...)
+  string account_id = 2;
   string driver_type = 3;
-  map<string, string> creds = 4;
-  google.protobuf.Timestamp expires_at = 5;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message TaskMeta {
+  string request_id = 1;   // business idempotency
+  uint64 seq = 2;          // transport idempotency
 }
 
 message Empty {}
 
-// Snapshot
+// Control-plane --> agent
 
-message Snapshot {
-  string version = 1;
-  repeated User users = 2;
-}
-
-message SnapshotRequest {
-  string agent_id = 1;
-  string version = 2;
-}
-
-// Task
-
-message TaskMeta {
-  string request_id = 1;   // business operation
-  uint64 seq = 2;   // agent ack for this
-}
-
-message UpsertUser {User user = 1;}
-message RemoveUser {string user_id = 1; string driver_type = 2;}
-message GetStatsAll {}
-message GetStatsUser {string user_id = 1;}
+message UserUpsertRequest {User user = 1;}
+message UserRemoveRequest {string user_id = 1; string driver_type = 2;}
+message StatsAllRequest {}
+message StatsUserRequest {string user_id = 1;}
 
 message Task {
   TaskMeta meta = 1;
 
   oneof body {
-    UpsertUser upsert = 2;
-    RemoveUser remove = 3;
-    GetStatsAll all_stats = 4;
-    GetStatsUser user_stats = 5;
-  }
-}
-
-message UserStat {string user_id = 1; uint64 bytes_rx = 2; uint64 bytes_tx = 3;}
-message StatsAll {TaskMeta meta = 1; repeated UserStat users = 2; uint64 total_bytes_rx = 3; uint64 total_bytes_tx = 4;}
-message StatsUser {TaskMeta meta = 1; UserStat stat = 2;}
-
-message Ack {uint64 seq = 1;}
-message Nack {uint64 seq = 1; string error = 2;}
-
-
-// Handshake
-
-message AgentHello {
-  string instance_id = 1;
-  string region = 2;
-  string version = 3;
-  repeated string driver_types = 4; // xray, wg and other
-}
-
-message Welcome {
-  string agent_id = 1;
-  string message = 2;
-}
-
-// service
-
-message AgentToControl {
-  oneof msg {
-    AgentHello hello = 1;
-    Ack ack = 2;
-    Nack nack = 3;
-    StatsAll all_stats = 4;
-    StatsUser user_stats = 5;
-    Heartbeat heartbeat = 6;
+    UserUpsertRequest  upsert = 2;
+    UserRemoveRequest  remove = 3;
+    StatsAllRequest stats_all = 4;
+    StatsUserRequest stats_user = 5;
   }
 }
 
@@ -95,16 +47,108 @@ message ControlToAgent {
   }
 }
 
+// Agent --> Control-plane
+
+message UserUpsertResponse {UserCreds creds = 1;}
+message UserRemoveResponse {}
+message StatsAllResponse {repeated UserStat users = 1; uint64 total_bytes_rx = 2; uint64 total_bytes_tx = 3;}
+message StatsUserResponse {UserStat stat = 1;}
+
+message Error {string error = 1;}
+
+message UserStat {string user_id = 1; uint64 bytes_rx = 2; uint64 bytes_tx = 3;}
+
 message Heartbeat {
   string  agent_id = 1;
   uint32  uptime_seconds = 2;
 }
 
+message Response {
+  TaskMeta meta = 1;
+
+  oneof body {
+    UserUpsertResponse  upsert = 2;
+    UserRemoveResponse  remove = 3;
+    StatsAllResponse stats_all = 4;
+    StatsUserResponse stats_user = 5;
+
+    Error error = 6;
+  }
+}
+
+message AgentToControl {
+  oneof msg {
+    AgentHello hello = 1;
+    Response resp = 2;
+    Heartbeat hb = 3;
+  }
+}
+
+// Handshake
+
+message AgentHello {
+  string agent_id = 1;
+  string instance_id = 2;
+  string region = 3;
+  string version = 4;
+  repeated string driver_types = 5; // xray, wg and other
+}
+
+message Welcome {
+  string agent_id = 1;
+  string message = 2;
+}
+
+// Service
+
 service ControlPlane {
   // Agent first opened stream and send AgentHello,
   // Server response welcome, and only after this start send tasks
   rpc Workstream(stream AgentToControl) returns (stream ControlToAgent);
+}
 
-  // Agent pulling snapshot
-  rpc GetSnapshot(SnapshotRequest) returns (Snapshot);
+// =====================
+// User creds
+// =====================
+
+message UserCreds {
+  string user_id = 1;
+  string agent_id = 2;
+  string driver_type = 3;
+  google.protobuf.Timestamp generated_at = 4;
+
+  oneof config {
+    VlessCreds     vless = 10;
+    WireGuardCreds wireguard = 11;
+  }
+}
+
+// Vless + reality
+message VlessCreds {
+  string uuid = 1;
+  string host = 2;
+  uint32 port = 3;
+  string security = 4;
+  string sni = 5;
+  string alpn = 6;
+  string path = 7;
+  string network = 8;
+  string flow = 9;
+
+  string uri = 10;
+}
+
+// WireGuard.
+message WireGuardCreds {
+  string private_key = 1;
+  string public_key = 2;
+  string peer_public_key = 3;
+  string endpoint = 4;
+  string address = 5;
+  repeated string allowed_ips = 6;
+  repeated string dns = 7;
+  uint32 mtu = 8;
+  string preshared_key = 9;
+
+  string config = 10;
 }

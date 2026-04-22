@@ -20,9 +20,12 @@ Usage:
 
 Required env:
   CONTROL_PLANE_ADDR   gRPC address of control-plane reachable from this server
-  XRAY_DOMAIN          domain used in REALITY serverNames
+  XRAY_DOMAIN          domain used in REALITY serverNames (fake SNI)
 
 Optional env:
+  AGENT_PUBLIC_HOST    public IP or domain this node serves VPN clients on;
+                       if empty, auto-detected via https://api.ipify.org
+
   REGION               default: FIN
   AGENT_ENV            default: prod
   AGENT_VERSION        default: 1.0.0
@@ -82,6 +85,14 @@ XRAY_PROTOCOL="${XRAY_PROTOCOL:-vless}"
 XRAY_INBOUND_TAG="${XRAY_INBOUND_TAG:-vless-in}"
 XRAY_VLESS_FLOW="${XRAY_VLESS_FLOW:-xtls-rprx-vision}"
 XRAY_SERVICE_NAME="${XRAY_SERVICE_NAME:-xray}"
+
+AGENT_PUBLIC_HOST="${AGENT_PUBLIC_HOST:-}"
+if [[ -z "${AGENT_PUBLIC_HOST}" ]]; then
+  log "AGENT_PUBLIC_HOST not set, trying to auto-detect via api.ipify.org"
+  AGENT_PUBLIC_HOST="$(curl -fsS --max-time 5 https://api.ipify.org || true)"
+fi
+[[ -n "${AGENT_PUBLIC_HOST}" ]] || die "AGENT_PUBLIC_HOST is required and auto-detection failed"
+log "agent public host: ${AGENT_PUBLIC_HOST}"
 
 AGENT_BIN_PATH="/usr/local/bin/skywalker-agent"
 AGENT_CONFIG_DIR="/etc/skywalker-agent"
@@ -168,12 +179,15 @@ generate_xray_keys_if_needed() {
     log "generating REALITY keypair"
     local key_output
     key_output="$(xray x25519)"
-    XRAY_PRIVATE_KEY="$(printf '%s\n' "${key_output}" | awk -F': ' '/Private key:/ {print $2}')"
-    XRAY_PUBLIC_KEY="$(printf '%s\n' "${key_output}" | awk -F': ' '/Public key:/ {print $2}')"
+    # xray <1.8 prints "Private key: ..." / "Public key: ...";
+    # xray 25+ prints "PrivateKey: ..." / "Password (PublicKey): ...".
+    # Match both. awk -F': ' splits on ": ", so $NF is the value in every case.
+    XRAY_PRIVATE_KEY="$(printf '%s\n' "${key_output}" | awk -F': ' '/^[[:space:]]*(Private ?[Kk]ey|PrivateKey)/ {print $NF; exit}')"
+    XRAY_PUBLIC_KEY="$(printf '%s\n' "${key_output}" | awk -F': ' '/^[[:space:]]*(Public ?[Kk]ey|Password([[:space:]]*\(PublicKey\))?)/ {print $NF; exit}')"
   fi
 
-  [[ -n "${XRAY_PRIVATE_KEY:-}" ]] || die "failed to get XRAY_PRIVATE_KEY"
-  [[ -n "${XRAY_PUBLIC_KEY:-}" ]] || die "failed to get XRAY_PUBLIC_KEY"
+  [[ -n "${XRAY_PRIVATE_KEY:-}" ]] || die "failed to get XRAY_PRIVATE_KEY (xray x25519 output: $(xray x25519))"
+  [[ -n "${XRAY_PUBLIC_KEY:-}" ]] || die "failed to get XRAY_PUBLIC_KEY (xray x25519 output: $(xray x25519))"
 
   if [[ -z "${XRAY_SHORT_ID:-}" ]]; then
     XRAY_SHORT_ID="$(openssl rand -hex 8)"
@@ -209,6 +223,13 @@ driver_xray:
   protocol: "${XRAY_PROTOCOL}"
   vless_flow: "${XRAY_VLESS_FLOW}"
   op_timeout: 3s
+
+  public_host: "${AGENT_PUBLIC_HOST}"
+  port: ${XRAY_PORT}
+  sni: "${XRAY_DOMAIN}"
+  public_key: "${XRAY_PUBLIC_KEY}"
+  short_id: "${XRAY_SHORT_ID}"
+  fingerprint: "chrome"
 
 storage_sqlite:
   path: "${AGENT_DATA_DIR}/agent.db"
@@ -276,6 +297,7 @@ xray config:    ${XRAY_CONFIG_PATH}
 control-plane:  ${CONTROL_PLANE_ADDR}
 region:         ${REGION}
 
+public host:    ${AGENT_PUBLIC_HOST}
 REALITY domain: ${XRAY_DOMAIN}
 REALITY dest:   ${XRAY_DEST}
 REALITY pubkey: ${XRAY_PUBLIC_KEY}

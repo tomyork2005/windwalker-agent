@@ -3,10 +3,12 @@ package driver
 // Driver for Xray, Xray gRPC API working with user`s email, here user`s email == user`s uuid
 
 import (
+	controlpb "agent/api/control"
 	"agent/internal/config"
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"sync"
@@ -177,6 +179,82 @@ func (d *XrayDriver) Stats(ctx context.Context) (map[string]any, error) {
 	return out, nil
 }
 
+// Creds
+
+func (d *XrayDriver) BuildCreds(u domain.User) (*controlpb.UserCreds, error) {
+	if u.ID == "" {
+		return nil, errors.New("user id is empty")
+	}
+	if d.cfg.Protocol != vlessProtocol {
+		return nil, fmt.Errorf("build creds: unsupported protocol %q", d.cfg.Protocol)
+	}
+
+	missing := make([]string, 0, 4)
+	if d.cfg.PublicHost == "" {
+		missing = append(missing, "public_host")
+	}
+	if d.cfg.SNI == "" {
+		missing = append(missing, "sni")
+	}
+	if d.cfg.PublicKey == "" {
+		missing = append(missing, "public_key")
+	}
+	if d.cfg.ShortID == "" {
+		missing = append(missing, "short_id")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("build creds: missing xray config fields: %v", missing)
+	}
+
+	port := d.cfg.Port
+	if port == 0 {
+		port = 443
+	}
+	fp := d.cfg.Fingerprint
+	if fp == "" {
+		fp = "chrome"
+	}
+	const (
+		network  = "tcp"
+		security = "reality"
+	)
+
+	q := url.Values{}
+	q.Set("encryption", "none")
+	q.Set("flow", d.cfg.VlessFlow)
+	q.Set("security", security)
+	q.Set("sni", d.cfg.SNI)
+	q.Set("fp", fp)
+	q.Set("pbk", d.cfg.PublicKey)
+	q.Set("sid", d.cfg.ShortID)
+	q.Set("type", network)
+
+	uri := (&url.URL{
+		Scheme:   "vless",
+		User:     url.User(u.ID),
+		Host:     d.cfg.PublicHost + ":" + strconv.FormatUint(uint64(port), 10),
+		RawQuery: q.Encode(),
+		Fragment: u.AccountID,
+	}).String()
+
+	return &controlpb.UserCreds{
+		UserId:     u.ID,
+		DriverType: d.name,
+		Config: &controlpb.UserCreds_Vless{
+			Vless: &controlpb.VlessCreds{
+				Uuid:     u.ID,
+				Host:     d.cfg.PublicHost,
+				Port:     port,
+				Security: security,
+				Sni:      d.cfg.SNI,
+				Network:  network,
+				Flow:     d.cfg.VlessFlow,
+				Uri:      uri,
+			},
+		},
+	}, nil
+}
+
 // Helpers
 
 func (d *XrayDriver) systemctl(ctx context.Context, action string) error {
@@ -226,13 +304,8 @@ func (d *XrayDriver) ensureConn(ctx context.Context) error {
 }
 
 func (d *XrayDriver) toXrayUser(user domain.User) (*protocol.User, error) {
-	email := user.ID // или c.Email
-	level := uint32(0)
-	if user.Creds["xray-level"] != "0" {
-		if n, err := strconv.ParseUint(user.Creds["xray-level"], 10, 32); err == nil {
-			level = uint32(n)
-		}
-	}
+	email := user.ID
+	const level uint32 = 0
 
 	switch d.cfg.Protocol {
 	case vlessProtocol:

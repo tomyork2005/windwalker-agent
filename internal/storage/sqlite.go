@@ -66,25 +66,39 @@ func initSQLiteSchema(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("read user_version: %w", err)
 	}
 
-	switch ver {
-	case 0:
+	if ver < 1 {
 		if _, err := tx.ExecContext(ctx, `
 			CREATE TABLE IF NOT EXISTS meta (
 				key   TEXT PRIMARY KEY,
-				value ITEGER NOT NULL
+				value TEXT NOT NULL
 			);
 		`); err != nil {
 			return fmt.Errorf("create meta: %w", err)
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-			CREATE TABLE IF NOT EXISTS users (
+			INSERT OR IGNORE INTO meta(key, value) VALUES ('last_applied_seq', '0');
+		`); err != nil {
+			return fmt.Errorf("init meta.last_applied_seq: %w", err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=1;`); err != nil {
+			return fmt.Errorf("set user_version=1: %w", err)
+		}
+	}
+
+	if ver < 2 {
+		if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS users;`); err != nil {
+			return fmt.Errorf("drop legacy users: %w", err)
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			CREATE TABLE users (
 				id          TEXT PRIMARY KEY,
-				name        TEXT NOT NULL,
+				account_id  TEXT NOT NULL,
 				driver_type TEXT NOT NULL,
-				creds_json  TEXT NOT NULL,
 				expires_at  INTEGER,
-				updated_at  INTEGER NOT NULL 
+				updated_at  INTEGER NOT NULL
 			);
 		`); err != nil {
 			return fmt.Errorf("create users: %w", err)
@@ -97,25 +111,20 @@ func initSQLiteSchema(ctx context.Context, db *sql.DB) error {
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-			CREATE INDEX IF NOT EXISTS idx_users_expired_at ON users(expires_at);
+			CREATE INDEX IF NOT EXISTS idx_users_account_id ON users(account_id);
 		`); err != nil {
-			return fmt.Errorf("create idx_users_expired_at: %w", err)
+			return fmt.Errorf("create idx_users_account_id: %w", err)
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO meta(key, value) VALUES ('last_applied_seq', '0');
+			CREATE INDEX IF NOT EXISTS idx_users_expires_at ON users(expires_at);
 		`); err != nil {
-			return fmt.Errorf("init meta.last_applied_seq: %w", err)
+			return fmt.Errorf("create idx_users_expires_at: %w", err)
 		}
 
-		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=1;`); err != nil {
-			return fmt.Errorf("set user_version: %w", err)
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=2;`); err != nil {
+			return fmt.Errorf("set user_version=2: %w", err)
 		}
-
-	case 1:
-		// new migration add here
-	default:
-
 	}
 
 	if err := tx.Commit(); err != nil {

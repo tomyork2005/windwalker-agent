@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	controlpb "agent/api/control"
 	"agent/internal/domain"
 
 	"github.com/stretchr/testify/assert"
@@ -65,15 +66,19 @@ func (m *mockTxManager) WithTx(ctx context.Context, fn func(ctx context.Context)
 }
 
 type mockDriverMultiplexer struct {
-	upsertErr error
-	removeErr error
+	upsertErr     error
+	removeErr     error
+	buildCredsErr error
 
-	upsertCalls int
-	removeCalls int
+	upsertCalls     int
+	removeCalls     int
+	buildCredsCalls int
 
 	upsertUser       domain.User
 	removeUserID     string
 	removeDriverType string
+
+	credsResp *controlpb.UserCreds
 }
 
 func (m *mockDriverMultiplexer) Upsert(_ context.Context, user domain.User) error {
@@ -87,6 +92,17 @@ func (m *mockDriverMultiplexer) Remove(_ context.Context, userID string, driverT
 	m.removeUserID = userID
 	m.removeDriverType = driverType
 	return m.removeErr
+}
+
+func (m *mockDriverMultiplexer) BuildCreds(user domain.User) (*controlpb.UserCreds, error) {
+	m.buildCredsCalls++
+	if m.buildCredsErr != nil {
+		return nil, m.buildCredsErr
+	}
+	if m.credsResp != nil {
+		return m.credsResp, nil
+	}
+	return &controlpb.UserCreds{UserId: user.ID, DriverType: user.DriverType}, nil
 }
 
 func TestService_UpsertUser(t *testing.T) {
@@ -174,7 +190,7 @@ func TestService_UpsertUser(t *testing.T) {
 		{
 			name:    "success",
 			meta:    &domain.Meta{Seq: 10},
-			user:    &domain.User{ID: "user-1", Name: "Alice"},
+			user:    &domain.User{ID: "user-1", AccountID: "acc-1", DriverType: "xray"},
 			storage: &mockStorage{lastSeq: 5},
 			driver:  &mockDriverMultiplexer{},
 			tx:      &mockTxManager{},
@@ -195,7 +211,7 @@ func TestService_UpsertUser(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			service := NewAgentService(tc.storage, tc.tx, tc.driver)
 
-			err := service.UpsertUser(context.Background(), tc.meta, tc.user)
+			_, err := service.UpsertUser(context.Background(), tc.meta, tc.user)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.ErrorContains(t, err, tc.wantErr)

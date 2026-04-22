@@ -6,9 +6,8 @@ import (
 
 type User struct {
 	ID         string
-	Name       string
+	AccountID  string
 	DriverType string
-	Creds      map[string]string
 	ExpiresAt  time.Time
 }
 

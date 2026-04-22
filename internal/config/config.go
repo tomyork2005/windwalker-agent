@@ -31,6 +31,16 @@ type XrayConfig struct {
 	Protocol    string        `yaml:"protocol" env-default:"vless"`
 	OpTimeout   time.Duration `yaml:"op_timeout" env-default:"5s"`
 	VlessFlow   string        `yaml:"vless_flow" env-default:"xtls-rprx-vision"`
+
+	// REALITY client-facing parameters, used to build VlessCreds for control-plane.
+	// PublicHost is the routable address of this node (IP or domain);
+	// SNI is the masquerade domain REALITY impersonates (differs from PublicHost).
+	PublicHost  string `yaml:"public_host" env:"AGENT_PUBLIC_HOST"`
+	Port        uint32 `yaml:"port" env-default:"443"`
+	SNI         string `yaml:"sni"`
+	PublicKey   string `yaml:"public_key"`
+	ShortID     string `yaml:"short_id"`
+	Fingerprint string `yaml:"fingerprint" env-default:"chrome"`
 }
 
 type TransportGrpcConfig struct {

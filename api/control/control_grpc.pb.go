@@ -19,8 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ControlPlane_Workstream_FullMethodName  = "/vpn.control.v1.ControlPlane/Workstream"
-	ControlPlane_GetSnapshot_FullMethodName = "/vpn.control.v1.ControlPlane/GetSnapshot"
+	ControlPlane_Workstream_FullMethodName = "/vpn.control.v1.ControlPlane/Workstream"
 )
 
 // ControlPlaneClient is the client API for ControlPlane service.
@@ -30,8 +29,6 @@ type ControlPlaneClient interface {
 	// Agent first opened stream and send AgentHello,
 	// Server response welcome, and only after this start send tasks
 	Workstream(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentToControl, ControlToAgent], error)
-	// Agent pulling snapshot
-	GetSnapshot(ctx context.Context, in *SnapshotRequest, opts ...grpc.CallOption) (*Snapshot, error)
 }
 
 type controlPlaneClient struct {
@@ -55,16 +52,6 @@ func (c *controlPlaneClient) Workstream(ctx context.Context, opts ...grpc.CallOp
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControlPlane_WorkstreamClient = grpc.BidiStreamingClient[AgentToControl, ControlToAgent]
 
-func (c *controlPlaneClient) GetSnapshot(ctx context.Context, in *SnapshotRequest, opts ...grpc.CallOption) (*Snapshot, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Snapshot)
-	err := c.cc.Invoke(ctx, ControlPlane_GetSnapshot_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // ControlPlaneServer is the server API for ControlPlane service.
 // All implementations must embed UnimplementedControlPlaneServer
 // for forward compatibility.
@@ -72,8 +59,6 @@ type ControlPlaneServer interface {
 	// Agent first opened stream and send AgentHello,
 	// Server response welcome, and only after this start send tasks
 	Workstream(grpc.BidiStreamingServer[AgentToControl, ControlToAgent]) error
-	// Agent pulling snapshot
-	GetSnapshot(context.Context, *SnapshotRequest) (*Snapshot, error)
 	mustEmbedUnimplementedControlPlaneServer()
 }
 
@@ -86,9 +71,6 @@ type UnimplementedControlPlaneServer struct{}
 
 func (UnimplementedControlPlaneServer) Workstream(grpc.BidiStreamingServer[AgentToControl, ControlToAgent]) error {
 	return status.Errorf(codes.Unimplemented, "method Workstream not implemented")
-}
-func (UnimplementedControlPlaneServer) GetSnapshot(context.Context, *SnapshotRequest) (*Snapshot, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetSnapshot not implemented")
 }
 func (UnimplementedControlPlaneServer) mustEmbedUnimplementedControlPlaneServer() {}
 func (UnimplementedControlPlaneServer) testEmbeddedByValue()                      {}
@@ -118,36 +100,13 @@ func _ControlPlane_Workstream_Handler(srv interface{}, stream grpc.ServerStream)
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControlPlane_WorkstreamServer = grpc.BidiStreamingServer[AgentToControl, ControlToAgent]
 
-func _ControlPlane_GetSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SnapshotRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ControlPlaneServer).GetSnapshot(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ControlPlane_GetSnapshot_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ControlPlaneServer).GetSnapshot(ctx, req.(*SnapshotRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // ControlPlane_ServiceDesc is the grpc.ServiceDesc for ControlPlane service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var ControlPlane_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "vpn.control.v1.ControlPlane",
 	HandlerType: (*ControlPlaneServer)(nil),
-	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "GetSnapshot",
-			Handler:    _ControlPlane_GetSnapshot_Handler,
-		},
-	},
+	Methods:     []grpc.MethodDesc{},
 	Streams: []grpc.StreamDesc{
 		{
 			StreamName:    "Workstream",

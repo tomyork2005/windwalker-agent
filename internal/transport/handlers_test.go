@@ -18,6 +18,7 @@ type mockTaskHandlers struct {
 		ctx    context.Context
 		meta   *domain.Meta
 		user   *domain.User
+		resp   *controlpb.UserCreds
 		err    error
 	}
 	remove struct {
@@ -28,29 +29,29 @@ type mockTaskHandlers struct {
 		driverType string
 		err        error
 	}
-	allStats struct {
+	statsAll struct {
 		called bool
 		ctx    context.Context
 		meta   *domain.Meta
-		resp   *controlpb.StatsAll
+		resp   *controlpb.StatsAllResponse
 		err    error
 	}
-	userStats struct {
+	statsUser struct {
 		called bool
 		ctx    context.Context
 		meta   *domain.Meta
 		userID string
-		resp   *controlpb.StatsUser
+		resp   *controlpb.StatsUserResponse
 		err    error
 	}
 }
 
-func (f *mockTaskHandlers) UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) error {
+func (f *mockTaskHandlers) UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) (*controlpb.UserCreds, error) {
 	f.upsert.called = true
 	f.upsert.ctx = ctx
 	f.upsert.meta = meta
 	f.upsert.user = user
-	return f.upsert.err
+	return f.upsert.resp, f.upsert.err
 }
 
 func (f *mockTaskHandlers) RemoveUser(ctx context.Context, meta *domain.Meta, userID string, driverType string) error {
@@ -62,19 +63,19 @@ func (f *mockTaskHandlers) RemoveUser(ctx context.Context, meta *domain.Meta, us
 	return f.remove.err
 }
 
-func (f *mockTaskHandlers) GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAll, error) {
-	f.allStats.called = true
-	f.allStats.ctx = ctx
-	f.allStats.meta = meta
-	return f.allStats.resp, f.allStats.err
+func (f *mockTaskHandlers) GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAllResponse, error) {
+	f.statsAll.called = true
+	f.statsAll.ctx = ctx
+	f.statsAll.meta = meta
+	return f.statsAll.resp, f.statsAll.err
 }
 
-func (f *mockTaskHandlers) GetStatsUser(ctx context.Context, meta *domain.Meta, userID string) (*controlpb.StatsUser, error) {
-	f.userStats.called = true
-	f.userStats.ctx = ctx
-	f.userStats.meta = meta
-	f.userStats.userID = userID
-	return f.userStats.resp, f.userStats.err
+func (f *mockTaskHandlers) GetStatsUser(ctx context.Context, meta *domain.Meta, userID string) (*controlpb.StatsUserResponse, error) {
+	f.statsUser.called = true
+	f.statsUser.ctx = ctx
+	f.statsUser.meta = meta
+	f.statsUser.userID = userID
+	return f.statsUser.resp, f.statsUser.err
 }
 
 type sendRecorder struct {
@@ -90,6 +91,24 @@ func (s *sendRecorder) send(msg *controlpb.AgentToControl) error {
 	err := s.errs[0]
 	s.errs = s.errs[1:]
 	return err
+}
+
+func responseFrom(t *testing.T, msg *controlpb.AgentToControl) *controlpb.Response {
+	t.Helper()
+	require.NotNil(t, msg)
+	wrap, ok := msg.Msg.(*controlpb.AgentToControl_Resp)
+	require.True(t, ok, "expected AgentToControl_Resp, got %T", msg.Msg)
+	require.NotNil(t, wrap.Resp)
+	return wrap.Resp
+}
+
+func assertError(t *testing.T, msg *controlpb.AgentToControl, seq uint64, wantErr string) {
+	t.Helper()
+	resp := responseFrom(t, msg)
+	assert.Equal(t, seq, resp.GetMeta().GetSeq())
+	errBody, ok := resp.Body.(*controlpb.Response_Error)
+	require.True(t, ok, "expected Response_Error, got %T", resp.Body)
+	assert.Equal(t, wantErr, errBody.Error.GetError())
 }
 
 func TestRouteTaskNilHandler(t *testing.T) {
@@ -108,36 +127,39 @@ func TestRouteTaskUpsert(t *testing.T) {
 	meta := &controlpb.TaskMeta{RequestId: "req-upsert", Seq: seq}
 	user := &controlpb.User{
 		Id:         "user-1",
-		Name:       "Alice",
+		AccountId:  "acc-1",
 		DriverType: "xray",
-		Creds:      map[string]string{"token": "abc"},
 	}
 
 	t.Run("success", func(t *testing.T) {
 		handler := &mockTaskHandlers{}
+		handler.upsert.resp = &controlpb.UserCreds{UserId: "user-1", DriverType: "xray"}
 		sender := &sendRecorder{}
 		task := &controlpb.Task{
 			Meta: meta,
-			Body: &controlpb.Task_Upsert{Upsert: &controlpb.UpsertUser{User: user}},
+			Body: &controlpb.Task_Upsert{Upsert: &controlpb.UserUpsertRequest{User: user}},
 		}
 
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
-		require.True(t, handler.upsert.called, "UpsertUser should be called")
-		require.Equal(t, ctx, handler.upsert.ctx, "unexpected context")
+		require.True(t, handler.upsert.called)
+		require.Equal(t, ctx, handler.upsert.ctx)
 
 		wantMeta := &domain.Meta{RequestID: meta.GetRequestId(), Seq: meta.GetSeq()}
 		assert.Equal(t, wantMeta, handler.upsert.meta)
 
 		wantUser := &domain.User{
 			ID:         user.GetId(),
-			Name:       user.GetName(),
+			AccountID:  user.GetAccountId(),
 			DriverType: user.GetDriverType(),
-			Creds:      user.GetCreds(),
 		}
 		assert.Equal(t, wantUser, handler.upsert.user)
 
 		require.Len(t, sender.messages, 1)
-		assertAck(t, sender.messages[0], seq)
+		resp := responseFrom(t, sender.messages[0])
+		assert.Equal(t, seq, resp.GetMeta().GetSeq())
+		upsertBody, ok := resp.Body.(*controlpb.Response_Upsert)
+		require.True(t, ok, "expected Response_Upsert, got %T", resp.Body)
+		assert.Equal(t, handler.upsert.resp, upsertBody.Upsert.GetCreds())
 	})
 
 	t.Run("handler error", func(t *testing.T) {
@@ -146,27 +168,27 @@ func TestRouteTaskUpsert(t *testing.T) {
 		sender := &sendRecorder{}
 		task := &controlpb.Task{
 			Meta: meta,
-			Body: &controlpb.Task_Upsert{Upsert: &controlpb.UpsertUser{User: user}},
+			Body: &controlpb.Task_Upsert{Upsert: &controlpb.UserUpsertRequest{User: user}},
 		}
 
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
 		require.Len(t, sender.messages, 1)
-		assertNack(t, sender.messages[0], seq, handler.upsert.err.Error())
+		assertError(t, sender.messages[0], seq, "upsert failed")
 	})
 
 	t.Run("send error", func(t *testing.T) {
 		handler := &mockTaskHandlers{}
+		handler.upsert.resp = &controlpb.UserCreds{UserId: "user-1"}
 		sendErr := errors.New("send failed")
 		sender := &sendRecorder{errs: []error{sendErr}}
 		task := &controlpb.Task{
 			Meta: meta,
-			Body: &controlpb.Task_Upsert{Upsert: &controlpb.UpsertUser{User: user}},
+			Body: &controlpb.Task_Upsert{Upsert: &controlpb.UserUpsertRequest{User: user}},
 		}
 
 		err := RouteTask(ctx, handler, task, sender.send)
 		require.ErrorIs(t, err, sendErr)
 		require.Len(t, sender.messages, 1)
-		assertAck(t, sender.messages[0], seq)
 	})
 }
 
@@ -174,7 +196,7 @@ func TestRouteTaskRemove(t *testing.T) {
 	ctx := context.Background()
 	seq := uint64(2)
 	meta := &controlpb.TaskMeta{RequestId: "req-remove", Seq: seq}
-	remove := &controlpb.RemoveUser{UserId: "user-2", DriverType: "slack"}
+	remove := &controlpb.UserRemoveRequest{UserId: "user-2", DriverType: "xray"}
 
 	t.Run("success", func(t *testing.T) {
 		handler := &mockTaskHandlers{}
@@ -185,7 +207,7 @@ func TestRouteTaskRemove(t *testing.T) {
 		}
 
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
-		require.True(t, handler.remove.called, "RemoveUser should be called")
+		require.True(t, handler.remove.called)
 
 		wantMeta := &domain.Meta{RequestID: meta.GetRequestId(), Seq: meta.GetSeq()}
 		assert.Equal(t, wantMeta, handler.remove.meta)
@@ -193,7 +215,10 @@ func TestRouteTaskRemove(t *testing.T) {
 		assert.Equal(t, remove.GetDriverType(), handler.remove.driverType)
 
 		require.Len(t, sender.messages, 1)
-		assertAck(t, sender.messages[0], seq)
+		resp := responseFrom(t, sender.messages[0])
+		assert.Equal(t, seq, resp.GetMeta().GetSeq())
+		_, ok := resp.Body.(*controlpb.Response_Remove)
+		require.True(t, ok, "expected Response_Remove, got %T", resp.Body)
 	})
 
 	t.Run("handler error", func(t *testing.T) {
@@ -207,94 +232,82 @@ func TestRouteTaskRemove(t *testing.T) {
 
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
 		require.Len(t, sender.messages, 1)
-		assertNack(t, sender.messages[0], seq, handler.remove.err.Error())
+		assertError(t, sender.messages[0], seq, "remove failed")
 	})
 }
 
-/*func TestRouteTaskAllStats(t *testing.T) {
+func TestRouteTaskStatsAll(t *testing.T) {
 	ctx := context.Background()
 	seq := uint64(3)
-	meta := &controlpb.TaskMeta{RequestId: "req-all-stats", Seq: seq}
+	meta := &controlpb.TaskMeta{RequestId: "req-stats-all", Seq: seq}
 	task := &controlpb.Task{
 		Meta: meta,
-		Body: &controlpb.Task_AllStats{AllStats: &controlpb.GetStatsAll{}},
+		Body: &controlpb.Task_StatsAll{StatsAll: &controlpb.StatsAllRequest{}},
 	}
 
 	t.Run("success", func(t *testing.T) {
 		handler := &mockTaskHandlers{}
-		handler.allStats.resp = &controlpb.StatsAll{TotalBytesRx: 100, TotalBytesTx: 200}
+		handler.statsAll.resp = &controlpb.StatsAllResponse{TotalBytesRx: 100, TotalBytesTx: 200}
 		sender := &sendRecorder{}
 
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
-		require.True(t, handler.allStats.called, "GetStatsAll should be called")
+		require.True(t, handler.statsAll.called)
 
-		wantMeta := &domain.Meta{RequestID: meta.GetRequestId(), Seq: meta.GetSeq()}
-		assert.Equal(t, wantMeta, handler.allStats.meta)
-
-		require.Len(t, sender.messages, 2)
-		assert.Equal(t, handler.allStats.resp, sender.messages[0].GetAllStats())
-		assertAck(t, sender.messages[1], seq)
+		require.Len(t, sender.messages, 1)
+		resp := responseFrom(t, sender.messages[0])
+		body, ok := resp.Body.(*controlpb.Response_StatsAll)
+		require.True(t, ok, "expected Response_StatsAll, got %T", resp.Body)
+		assert.Equal(t, handler.statsAll.resp, body.StatsAll)
 	})
 
 	t.Run("handler error", func(t *testing.T) {
 		handler := &mockTaskHandlers{}
-		handler.allStats.err = errors.New("stats failed")
+		handler.statsAll.err = errors.New("stats failed")
 		sender := &sendRecorder{}
 
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
 		require.Len(t, sender.messages, 1)
-		assertNack(t, sender.messages[0], seq, handler.allStats.err.Error())
-	})
-
-	t.Run("send error on stats", func(t *testing.T) {
-		handler := &mockTaskHandlers{}
-		handler.allStats.resp = &controlpb.StatsAll{}
-		sendErr := errors.New("stats send failed")
-		sender := &sendRecorder{errs: []error{sendErr}}
-
-		err := RouteTask(ctx, handler, task, sender.send)
-		require.ErrorIs(t, err, sendErr)
-		require.Len(t, sender.messages, 1)
-		require.NotNil(t, sender.messages[0].GetAllStats())
+		assertError(t, sender.messages[0], seq, "stats failed")
 	})
 }
 
-func TestRouteTaskUserStats(t *testing.T) {
+func TestRouteTaskStatsUser(t *testing.T) {
 	ctx := context.Background()
 	seq := uint64(4)
-	meta := &controlpb.TaskMeta{RequestId: "req-user-stats", Seq: seq}
-	body := &controlpb.Task_UserStats{UserStats: &controlpb.GetStatsUser{UserId: "user-3"}}
-	task := &controlpb.Task{Meta: meta, Body: body}
+	meta := &controlpb.TaskMeta{RequestId: "req-stats-user", Seq: seq}
+	task := &controlpb.Task{
+		Meta: meta,
+		Body: &controlpb.Task_StatsUser{StatsUser: &controlpb.StatsUserRequest{UserId: "user-3"}},
+	}
 
 	t.Run("success", func(t *testing.T) {
 		handler := &mockTaskHandlers{}
-		handler.userStats.resp = &controlpb.StatsUser{
+		handler.statsUser.resp = &controlpb.StatsUserResponse{
 			Stat: &controlpb.UserStat{UserId: "user-3", BytesRx: 10, BytesTx: 20},
 		}
 		sender := &sendRecorder{}
 
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
-		require.True(t, handler.userStats.called, "GetStatsUser should be called")
+		require.True(t, handler.statsUser.called)
+		assert.Equal(t, "user-3", handler.statsUser.userID)
 
-		wantMeta := &domain.Meta{RequestID: meta.GetRequestId(), Seq: meta.GetSeq()}
-		assert.Equal(t, wantMeta, handler.userStats.meta)
-		assert.Equal(t, "user-3", handler.userStats.userID)
-
-		require.Len(t, sender.messages, 2)
-		assert.Equal(t, handler.userStats.resp, sender.messages[0].GetUserStats())
-		assertAck(t, sender.messages[1], seq)
+		require.Len(t, sender.messages, 1)
+		resp := responseFrom(t, sender.messages[0])
+		body, ok := resp.Body.(*controlpb.Response_StatsUser)
+		require.True(t, ok, "expected Response_StatsUser, got %T", resp.Body)
+		assert.Equal(t, handler.statsUser.resp, body.StatsUser)
 	})
 
 	t.Run("handler error", func(t *testing.T) {
 		handler := &mockTaskHandlers{}
-		handler.userStats.err = errors.New("user stats failed")
+		handler.statsUser.err = errors.New("user stats failed")
 		sender := &sendRecorder{}
 
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
 		require.Len(t, sender.messages, 1)
-		assertNack(t, sender.messages[0], seq, handler.userStats.err.Error())
+		assertError(t, sender.messages[0], seq, "user stats failed")
 	})
-}*/
+}
 
 func TestRouteTaskUnknownTask(t *testing.T) {
 	ctx := context.Background()
@@ -305,20 +318,5 @@ func TestRouteTaskUnknownTask(t *testing.T) {
 
 	require.NoError(t, RouteTask(ctx, handler, task, sender.send))
 	require.Len(t, sender.messages, 1)
-	assertNack(t, sender.messages[0], seq, errUnknownTask.Error())
-}
-
-func assertAck(t *testing.T, msg *controlpb.AgentToControl, seq uint64) {
-	t.Helper()
-	ack := msg.GetAck()
-	require.NotNil(t, ack, "expected Ack message")
-	assert.Equal(t, seq, ack.GetSeq())
-}
-
-func assertNack(t *testing.T, msg *controlpb.AgentToControl, seq uint64, wantErr string) {
-	t.Helper()
-	nack := msg.GetNack()
-	require.NotNil(t, nack, "expected Nack message")
-	assert.Equal(t, seq, nack.GetSeq())
-	assert.Equal(t, wantErr, nack.GetError())
+	assertError(t, sender.messages[0], seq, errUnknownTask.Error())
 }

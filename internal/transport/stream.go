@@ -181,6 +181,7 @@ func (c *Client) runOnce(ctx context.Context, h TaskHandlers) error {
 	if err := stream.Send(&controlpb.AgentToControl{
 		Msg: &controlpb.AgentToControl_Hello{
 			Hello: &controlpb.AgentHello{
+				AgentId:     c.cfg.AgentID,
 				InstanceId:  c.cfg.InstanceID,
 				Region:      c.cfg.Region,
 				Version:     c.cfg.Version,
@@ -253,8 +254,8 @@ func (c *Client) writer(ctx context.Context, stream controlpb.ControlPlane_Works
 				"uptime_seconds", uint32(time.Since(c.start)/time.Second),
 			)
 			if err := stream.Send(&controlpb.AgentToControl{
-				Msg: &controlpb.AgentToControl_Heartbeat{
-					Heartbeat: &controlpb.Heartbeat{
+				Msg: &controlpb.AgentToControl_Hb{
+					Hb: &controlpb.Heartbeat{
 						AgentId:       c.cfg.AgentID,
 						UptimeSeconds: uint32(time.Since(c.start) / time.Second),
 					},
@@ -282,10 +283,12 @@ func (c *Client) reader(ctx context.Context, stream controlpb.ControlPlane_Works
 
 		switch m := in.Msg.(type) {
 		case *controlpb.ControlToAgent_Welcome:
-			if m.Welcome.GetAgentId() != "" {
-				c.cfg.AgentID = m.Welcome.GetAgentId()
-				aid := m.Welcome.GetAgentId()
+			if aid := m.Welcome.GetAgentId(); aid != "" {
+				c.cfg.AgentID = aid
 				logx.Set("agent_id", aid)
+				if s, ok := h.(interface{ SetAgentID(string) }); ok {
+					s.SetAgentID(aid)
+				}
 				logx.Info("welcome received", "agent_id", aid)
 			} else {
 				logx.Info("welcome received with empty agent_id")

@@ -22,6 +22,14 @@ driver_xray:
   vless_flow: xtls-rprx-vision
   op_timeout: 3s                   # deadline on RPC
 
+  # REALITY client-facing params used to build VlessCreds for control-plane.
+  public_host: ""                  # routable address of this node (IP or domain)
+  port: 443
+  sni: ""                          # fake SNI domain (REALITY serverNames[0])
+  public_key: ""                   # REALITY x25519 public key
+  short_id: ""                     # REALITY shortId (hex)
+  fingerprint: chrome
+
 storage_sqlite:
   path: ./data/agent.db
   busy_timeout: 5s

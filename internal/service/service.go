@@ -6,6 +6,8 @@ import (
 	"agent/internal/logx"
 	"context"
 	"fmt"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Storage interface {
@@ -22,12 +24,14 @@ type TxManager interface {
 type DriverMultiplexer interface {
 	Upsert(ctx context.Context, user domain.User) error
 	Remove(ctx context.Context, userID string, driverType string) error
+	BuildCreds(user domain.User) (*controlpb.UserCreds, error)
 }
 
 type Service struct {
 	storage     Storage
 	tx          TxManager
 	multiplexer DriverMultiplexer
+	agentID     string
 }
 
 func NewAgentService(storage Storage, tx TxManager, multiplexer DriverMultiplexer) *Service {
@@ -38,9 +42,13 @@ func NewAgentService(storage Storage, tx TxManager, multiplexer DriverMultiplexe
 	}
 }
 
-func (s *Service) UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) error {
+// SetAgentID attaches agent_id (received from control-plane in Welcome)
+// so it can be stamped on UserCreds responses.
+func (s *Service) SetAgentID(id string) { s.agentID = id }
+
+func (s *Service) UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) (*controlpb.UserCreds, error) {
 	if meta == nil || user == nil || user.ID == "" {
-		return fmt.Errorf("invalid upsert request payload")
+		return nil, fmt.Errorf("invalid upsert request payload")
 	}
 
 	log := logx.With(
@@ -51,13 +59,13 @@ func (s *Service) UpsertUser(ctx context.Context, meta *domain.Meta, user *domai
 	)
 	log.Debug("starting user upsert")
 
-	return s.tx.WithTx(ctx, func(ctx context.Context) error {
+	err := s.tx.WithTx(ctx, func(ctx context.Context) error {
 		last, err := s.storage.GetLastAppliedSeq(ctx)
 		if err != nil {
 			log.Error("storage read failed", "err", err)
 			return fmt.Errorf("storage get last applied seq: %w", err)
 		}
-		if meta != nil && meta.Seq != 0 && meta.Seq <= last {
+		if meta.Seq != 0 && meta.Seq <= last {
 			log.Info("skip duplicated task")
 			return nil
 		}
@@ -71,7 +79,7 @@ func (s *Service) UpsertUser(ctx context.Context, meta *domain.Meta, user *domai
 			return fmt.Errorf("storage upsert user: %w", err)
 		}
 
-		if meta != nil && meta.Seq != 0 {
+		if meta.Seq != 0 {
 			if err := s.storage.SetLastAppliedSeq(ctx, meta.Seq); err != nil {
 				log.Error("storage set last seq failed", "err", err)
 				return fmt.Errorf("storage set last applied seq: %w", err)
@@ -81,6 +89,18 @@ func (s *Service) UpsertUser(ctx context.Context, meta *domain.Meta, user *domai
 		log.Info("user upserted successfully")
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	creds, err := s.multiplexer.BuildCreds(*user)
+	if err != nil {
+		log.Error("build creds failed", "err", err)
+		return nil, fmt.Errorf("build creds: %w", err)
+	}
+	creds.AgentId = s.agentID
+	creds.GeneratedAt = timestamppb.Now()
+	return creds, nil
 }
 
 func (s *Service) RemoveUser(ctx context.Context, meta *domain.Meta, userID string, driverType string) error {
@@ -93,7 +113,7 @@ func (s *Service) RemoveUser(ctx context.Context, meta *domain.Meta, userID stri
 		"op", "remove",
 		"seq", meta.Seq,
 		"user_id", userID,
-		"driverType", driverType,
+		"driver_type", driverType,
 	)
 	log.Debug("starting user remove")
 
@@ -103,7 +123,7 @@ func (s *Service) RemoveUser(ctx context.Context, meta *domain.Meta, userID stri
 			log.Error("storage read failed", "err", err)
 			return fmt.Errorf("storage get last applied seq: %w", err)
 		}
-		if meta != nil && meta.Seq != 0 && meta.Seq <= last {
+		if meta.Seq != 0 && meta.Seq <= last {
 			log.Info("skip duplicated task")
 			return nil
 		}
@@ -117,21 +137,22 @@ func (s *Service) RemoveUser(ctx context.Context, meta *domain.Meta, userID stri
 			return fmt.Errorf("storage remove user: %w", err)
 		}
 
-		if meta != nil && meta.Seq != 0 {
+		if meta.Seq != 0 {
 			if err := s.storage.SetLastAppliedSeq(ctx, meta.Seq); err != nil {
 				log.Error("storage set last seq failed", "err", err)
 				return fmt.Errorf("storage set last applied seq: %w", err)
 			}
 		}
-		log.Info("user upserted successfully")
+		log.Info("user removed successfully")
 
 		return nil
 	})
 }
 
-func (s *Service) GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAll, error) {
-	return nil, nil
+func (s *Service) GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAllResponse, error) {
+	return &controlpb.StatsAllResponse{}, nil
 }
-func (s *Service) GetStatsUser(ctx context.Context, meta *domain.Meta, userID string) (*controlpb.StatsUser, error) {
-	return nil, nil
+
+func (s *Service) GetStatsUser(ctx context.Context, meta *domain.Meta, userID string) (*controlpb.StatsUserResponse, error) {
+	return &controlpb.StatsUserResponse{Stat: &controlpb.UserStat{UserId: userID}}, nil
 }
