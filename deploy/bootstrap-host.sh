@@ -16,19 +16,19 @@ die() {
 usage() {
   cat <<'EOF'
 Usage:
-  sudo CONTROL_PLANE_ADDR=<host:port> XRAY_DOMAIN=<domain> [other envs] ./deploy/bootstrap-host.sh
+  sudo XRAY_DOMAIN=<domain> [other envs] ./deploy/bootstrap-host.sh
+
+The agent config is taken from ./config/config.yaml in the repo. Only fields
+generated on this host at deploy time (public_host, sni, public_key, short_id)
+are patched in if they are empty in the repo file. Edit the repo config to
+change region, control-plane address, agent_id, version, etc.
 
 Required env:
-  CONTROL_PLANE_ADDR   gRPC address of control-plane reachable from this server
   XRAY_DOMAIN          domain used in REALITY serverNames (fake SNI)
 
 Optional env:
   AGENT_PUBLIC_HOST    public IP or domain this node serves VPN clients on;
                        if empty, auto-detected via https://api.ipify.org
-
-  REGION               default: FIN
-  AGENT_ENV            default: prod
-  AGENT_VERSION        default: 1.0.0
 
   GO_VERSION           if Go is absent, script installs this version from go.dev
   FORCE_INSTALL_GO     1/0, default: 0
@@ -46,11 +46,10 @@ Optional env:
   XRAY_SHORT_ID        optional; if empty, generated automatically
 
 Examples:
-  sudo CONTROL_PLANE_ADDR=1.2.3.4:9000 XRAY_DOMAIN=cdn.example.com ./deploy/bootstrap-host.sh
+  sudo XRAY_DOMAIN=cdn.example.com ./deploy/bootstrap-host.sh
 
-  sudo CONTROL_PLANE_ADDR=control.example.com:9000 \
-       XRAY_DOMAIN=cdn.example.com \
-       REGION=NLD \
+  sudo XRAY_DOMAIN=cdn.example.com \
+       AGENT_PUBLIC_HOST=1.2.3.4 \
        GO_VERSION=1.25.8 \
        ./deploy/bootstrap-host.sh
 EOF
@@ -65,15 +64,14 @@ EOF
 [[ -f "${SCRIPT_DIR}/skywalker-agent.service" ]] || die "deploy/skywalker-agent.service not found"
 [[ -f "${SCRIPT_DIR}/xray-config.template.json" ]] || die "deploy/xray-config.template.json not found"
 
-CONTROL_PLANE_ADDR="${CONTROL_PLANE_ADDR:-}"
 XRAY_DOMAIN="${XRAY_DOMAIN:-}"
 
-[[ -n "${CONTROL_PLANE_ADDR}" ]] || die "CONTROL_PLANE_ADDR is required"
 [[ -n "${XRAY_DOMAIN}" ]] || die "XRAY_DOMAIN is required"
 
-REGION="${REGION:-FIN}"
-AGENT_ENV="${AGENT_ENV:-prod}"
-AGENT_VERSION="${AGENT_VERSION:-1.0.0}"
+# Filled from ./config/config.yaml inside write_agent_config so the deploy
+# summary reflects what actually got written, not the env defaults.
+REGION=""
+CONTROL_PLANE_ADDR=""
 
 GO_VERSION="${GO_VERSION:-}"
 FORCE_INSTALL_GO="${FORCE_INSTALL_GO:-0}"
@@ -195,51 +193,30 @@ generate_xray_keys_if_needed() {
 }
 
 write_agent_config() {
-  log "writing agent config to ${AGENT_CONFIG_PATH}"
+  local repo_config="${REPO_ROOT}/config/config.yaml"
+  [[ -f "${repo_config}" ]] || die "repo config not found: ${repo_config}"
+
+  log "writing agent config to ${AGENT_CONFIG_PATH} (from ${repo_config})"
   install -d -m 0755 "${AGENT_CONFIG_DIR}"
   install -d -m 0755 "${AGENT_DATA_DIR}"
 
-  cat > "${AGENT_CONFIG_PATH}" <<EOF
-env: "${AGENT_ENV}"
-
-transport_grpc:
-  address: "${CONTROL_PLANE_ADDR}"
-  agent_id: ""
-  instance_id: ""
-  region: "${REGION}"
-  version: "${AGENT_VERSION}"
-  driver_types: ["xray"]
-
-  heartbeat_period: 20s
-  send_queue_size: 128
-  reconnect_min: 500ms
-  reconnect_max: 10s
-  dial_timeout: 5s
-
-driver_xray:
-  service_name: "${XRAY_SERVICE_NAME}"
-  api_addr: "${XRAY_API_ADDR}"
-  inbound_tag: "${XRAY_INBOUND_TAG}"
-  protocol: "${XRAY_PROTOCOL}"
-  vless_flow: "${XRAY_VLESS_FLOW}"
-  op_timeout: 3s
-
-  public_host: "${AGENT_PUBLIC_HOST}"
-  port: ${XRAY_PORT}
-  sni: "${XRAY_DOMAIN}"
-  public_key: "${XRAY_PUBLIC_KEY}"
-  short_id: "${XRAY_SHORT_ID}"
-  fingerprint: "chrome"
-
-storage_sqlite:
-  path: "${AGENT_DATA_DIR}/agent.db"
-  busy_timeout: 5s
-  wal: true
-  synchronous_full: false
-  foreign_keys: true
-EOF
+  # Copy user's repo config as-is, then patch only the fields that are
+  # generated at deploy time on this host (REALITY keys, public host, SNI).
+  # Everything else — region, control-plane address, agent_id, version,
+  # driver_types, timeouts, storage settings — is taken from the repo file.
+  sed \
+    -e "s|^\([[:space:]]*public_host:\)[[:space:]]*\"\"|\1 \"$(escape_sed "${AGENT_PUBLIC_HOST}")\"|" \
+    -e "s|^\([[:space:]]*sni:\)[[:space:]]*\"\"|\1 \"$(escape_sed "${XRAY_DOMAIN}")\"|" \
+    -e "s|^\([[:space:]]*public_key:\)[[:space:]]*\"\"|\1 \"$(escape_sed "${XRAY_PUBLIC_KEY}")\"|" \
+    -e "s|^\([[:space:]]*short_id:\)[[:space:]]*\"\"|\1 \"$(escape_sed "${XRAY_SHORT_ID}")\"|" \
+    "${repo_config}" > "${AGENT_CONFIG_PATH}"
 
   chmod 0644 "${AGENT_CONFIG_PATH}"
+
+  # Surface what we actually deployed so mismatches between repo config and
+  # deploy-time env (e.g. REGION env vs region: in yaml) are visible.
+  REGION="$(awk '/^[[:space:]]*region:/ {gsub(/"/,"",$2); print $2; exit}' "${AGENT_CONFIG_PATH}")"
+  CONTROL_PLANE_ADDR="$(awk '/^[[:space:]]*address:/ {gsub(/"/,"",$2); print $2; exit}' "${AGENT_CONFIG_PATH}")"
 }
 
 write_xray_config() {
