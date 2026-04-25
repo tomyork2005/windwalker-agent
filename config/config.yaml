@@ -1,11 +1,11 @@
 env: "prod"
 
 transport_grpc:
-  address: "123"                       # gRPC address control_plane
-  agent_id: ""                      # welcome from server
-  instance_id: ""                   # generated in every start
-  region: "FIN"                     # ISO alpha-3 country code
-  version: "1.0.0"                  # agent version
+  address: "himura.tech:50051"     # gRPC address control_plane
+  agent_id: "LV-1"                 # welcome from server
+  instance_id: ""                  # generated in every start
+  region: "LV"                     # ISO alpha-2 country code
+  version: "1.0.0"                 # agent version
   driver_types: [ "xray" ]
 
   heartbeat_period: 20s
