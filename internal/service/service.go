@@ -6,6 +6,7 @@ import (
 	"agent/internal/logx"
 	"context"
 	"fmt"
+	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -15,6 +16,7 @@ type Storage interface {
 	SetLastAppliedSeq(ctx context.Context, seq uint64) error
 	UpsertUser(ctx context.Context, u domain.User) error
 	RemoveUser(ctx context.Context, userID string) error
+	RenewUser(ctx context.Context, userID, driverType string, expiresAt time.Time) error
 }
 
 type TxManager interface {
@@ -144,6 +146,48 @@ func (s *Service) RemoveUser(ctx context.Context, meta *domain.Meta, userID stri
 			}
 		}
 		log.Info("user removed successfully")
+
+		return nil
+	})
+}
+
+func (s *Service) RenewUser(ctx context.Context, meta *domain.Meta, userID, driverType string, expiresAt time.Time) error {
+	if meta == nil || userID == "" || driverType == "" {
+		return fmt.Errorf("invalid renew request payload")
+	}
+
+	log := logx.With(
+		"component", "service",
+		"op", "renew",
+		"seq", meta.Seq,
+		"user_id", userID,
+		"driver_type", driverType,
+	)
+	log.Debug("starting user renew")
+
+	return s.tx.WithTx(ctx, func(ctx context.Context) error {
+		last, err := s.storage.GetLastAppliedSeq(ctx)
+		if err != nil {
+			log.Error("storage read failed", "err", err)
+			return fmt.Errorf("storage get last applied seq: %w", err)
+		}
+		if meta.Seq != 0 && meta.Seq <= last {
+			log.Info("skip duplicated task")
+			return nil
+		}
+
+		if err := s.storage.RenewUser(ctx, userID, driverType, expiresAt); err != nil {
+			log.Error("storage renew failed", "err", err)
+			return fmt.Errorf("storage renew user: %w", err)
+		}
+
+		if meta.Seq != 0 {
+			if err := s.storage.SetLastAppliedSeq(ctx, meta.Seq); err != nil {
+				log.Error("storage set last seq failed", "err", err)
+				return fmt.Errorf("storage set last applied seq: %w", err)
+			}
+		}
+		log.Info("user renewed successfully")
 
 		return nil
 	})

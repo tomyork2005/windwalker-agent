@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	controlpb "agent/api/control"
 	"agent/internal/domain"
+	"agent/internal/storage"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,15 +20,20 @@ type mockStorage struct {
 	setErr    error
 	upsertErr error
 	removeErr error
+	renewErr  error
 
 	getCalls    int
 	setCalls    int
 	upsertCalls int
 	removeCalls int
+	renewCalls  int
 
-	setSeq       uint64
-	upsertUser   domain.User
-	removeUserID string
+	setSeq          uint64
+	upsertUser      domain.User
+	removeUserID    string
+	renewUserID     string
+	renewDriverType string
+	renewExpiresAt  time.Time
 }
 
 func (m *mockStorage) GetLastAppliedSeq(_ context.Context) (uint64, error) {
@@ -50,6 +57,14 @@ func (m *mockStorage) RemoveUser(_ context.Context, userID string) error {
 	m.removeCalls++
 	m.removeUserID = userID
 	return m.removeErr
+}
+
+func (m *mockStorage) RenewUser(_ context.Context, userID, driverType string, expiresAt time.Time) error {
+	m.renewCalls++
+	m.renewUserID = userID
+	m.renewDriverType = driverType
+	m.renewExpiresAt = expiresAt
+	return m.renewErr
 }
 
 type mockTxManager struct {
@@ -342,6 +357,172 @@ func TestService_RemoveUser(t *testing.T) {
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.ErrorContains(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			tc.assertF(t, tc.storage, tc.driver, tc.tx)
+		})
+	}
+}
+
+func TestService_RenewUser(t *testing.T) {
+	exp := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name       string
+		meta       *domain.Meta
+		userID     string
+		driverType string
+		expiresAt  time.Time
+		storage    *mockStorage
+		driver     *mockDriverMultiplexer
+		tx         *mockTxManager
+		wantErr    string
+		wantErrIs  error
+		assertF    func(t *testing.T, storage *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager)
+	}{
+		{
+			name:       "invalid payload nil meta",
+			meta:       nil,
+			userID:     "user-1",
+			driverType: "xray",
+			expiresAt:  exp,
+			storage:    &mockStorage{},
+			driver:     &mockDriverMultiplexer{},
+			tx:         &mockTxManager{},
+			wantErr:    "invalid renew request payload",
+			assertF: func(t *testing.T, storage *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager) {
+				assert.Equal(t, 0, tx.calls)
+				assert.Equal(t, 0, storage.renewCalls)
+			},
+		},
+		{
+			name:       "invalid payload empty user id",
+			meta:       &domain.Meta{Seq: 10},
+			userID:     "",
+			driverType: "xray",
+			expiresAt:  exp,
+			storage:    &mockStorage{},
+			driver:     &mockDriverMultiplexer{},
+			tx:         &mockTxManager{},
+			wantErr:    "invalid renew request payload",
+			assertF: func(t *testing.T, storage *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager) {
+				assert.Equal(t, 0, tx.calls)
+				assert.Equal(t, 0, storage.renewCalls)
+			},
+		},
+		{
+			name:       "invalid payload empty driver type",
+			meta:       &domain.Meta{Seq: 10},
+			userID:     "user-1",
+			driverType: "",
+			expiresAt:  exp,
+			storage:    &mockStorage{},
+			driver:     &mockDriverMultiplexer{},
+			tx:         &mockTxManager{},
+			wantErr:    "invalid renew request payload",
+			assertF: func(t *testing.T, storage *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager) {
+				assert.Equal(t, 0, tx.calls)
+				assert.Equal(t, 0, storage.renewCalls)
+			},
+		},
+		{
+			name:       "duplicate seq",
+			meta:       &domain.Meta{Seq: 5},
+			userID:     "user-1",
+			driverType: "xray",
+			expiresAt:  exp,
+			storage:    &mockStorage{lastSeq: 7},
+			driver:     &mockDriverMultiplexer{},
+			tx:         &mockTxManager{},
+			assertF: func(t *testing.T, storage *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager) {
+				assert.Equal(t, 1, tx.calls)
+				assert.Equal(t, 1, storage.getCalls)
+				assert.Equal(t, 0, storage.renewCalls)
+				assert.Equal(t, 0, storage.setCalls)
+			},
+		},
+		{
+			name:       "storage renew error",
+			meta:       &domain.Meta{Seq: 10},
+			userID:     "user-1",
+			driverType: "xray",
+			expiresAt:  exp,
+			storage:    &mockStorage{lastSeq: 4, renewErr: errors.New("db failed")},
+			driver:     &mockDriverMultiplexer{},
+			tx:         &mockTxManager{},
+			wantErr:    "storage renew user",
+			assertF: func(t *testing.T, storage *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager) {
+				assert.Equal(t, 1, storage.renewCalls)
+				assert.Equal(t, 0, storage.setCalls)
+			},
+		},
+		{
+			name:       "storage user not found",
+			meta:       &domain.Meta{Seq: 10},
+			userID:     "user-1",
+			driverType: "xray",
+			expiresAt:  exp,
+			storage:    &mockStorage{lastSeq: 4, renewErr: storage.ErrUserNotFound},
+			driver:     &mockDriverMultiplexer{},
+			tx:         &mockTxManager{},
+			wantErr:    "user not found",
+			wantErrIs:  storage.ErrUserNotFound,
+			assertF: func(t *testing.T, s *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager) {
+				assert.Equal(t, 1, s.renewCalls)
+				assert.Equal(t, 0, s.setCalls)
+			},
+		},
+		{
+			name:       "storage seq error",
+			meta:       &domain.Meta{Seq: 10},
+			userID:     "user-1",
+			driverType: "xray",
+			expiresAt:  exp,
+			storage:    &mockStorage{lastSeq: 4, setErr: errors.New("db failed")},
+			driver:     &mockDriverMultiplexer{},
+			tx:         &mockTxManager{},
+			wantErr:    "storage set last applied seq",
+			assertF: func(t *testing.T, storage *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager) {
+				assert.Equal(t, 1, storage.renewCalls)
+				assert.Equal(t, 1, storage.setCalls)
+			},
+		},
+		{
+			name:       "success",
+			meta:       &domain.Meta{Seq: 10},
+			userID:     "user-1",
+			driverType: "xray",
+			expiresAt:  exp,
+			storage:    &mockStorage{lastSeq: 4},
+			driver:     &mockDriverMultiplexer{},
+			tx:         &mockTxManager{},
+			assertF: func(t *testing.T, s *mockStorage, driver *mockDriverMultiplexer, tx *mockTxManager) {
+				assert.Equal(t, 1, s.renewCalls)
+				assert.Equal(t, "user-1", s.renewUserID)
+				assert.Equal(t, "xray", s.renewDriverType)
+				assert.True(t, s.renewExpiresAt.Equal(exp))
+				assert.Equal(t, 1, s.setCalls)
+				assert.Equal(t, uint64(10), s.setSeq)
+				assert.Equal(t, 0, driver.removeCalls)
+				assert.Equal(t, 0, driver.upsertCalls)
+				assert.Equal(t, 0, driver.buildCredsCalls)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			service := NewAgentService(tc.storage, tc.tx, tc.driver)
+
+			err := service.RenewUser(context.Background(), tc.meta, tc.userID, tc.driverType, tc.expiresAt)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tc.wantErr)
+				if tc.wantErrIs != nil {
+					assert.ErrorIs(t, err, tc.wantErrIs)
+				}
 			} else {
 				require.NoError(t, err)
 			}

@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+var ErrUserNotFound = errors.New("user not found")
+
 type Storage struct {
 	db        *sql.DB
 	txManager *TxManager
@@ -72,6 +74,27 @@ func (s *Storage) UpsertUser(ctx context.Context, u domain.User) error {
 		  updated_at=excluded.updated_at
 	`, u.ID, u.AccountID, u.DriverType, exp, time.Now().Unix())
 	return err
+}
+
+func (s *Storage) RenewUser(ctx context.Context, userID, driverType string, expiresAt time.Time) error {
+	var exp any
+	if !expiresAt.IsZero() {
+		exp = expiresAt.Unix()
+	}
+	res, err := s.ex(ctx).ExecContext(ctx, `
+		UPDATE users SET expires_at=?, updated_at=? WHERE id=? AND driver_type=?
+	`, exp, time.Now().Unix(), userID, driverType)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 func (s *Storage) RemoveUser(ctx context.Context, userID string) error {

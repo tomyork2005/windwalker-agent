@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 var errUnknownTask = errors.New("unknown task")
@@ -14,6 +15,7 @@ var errUnknownTask = errors.New("unknown task")
 type TaskHandlers interface {
 	UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) (*controlpb.UserCreds, error)
 	RemoveUser(ctx context.Context, meta *domain.Meta, userID string, driverType string) error
+	RenewUser(ctx context.Context, meta *domain.Meta, userID, driverType string, expiresAt time.Time) error
 	GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAllResponse, error)
 	GetStatsUser(ctx context.Context, meta *domain.Meta, userID string) (*controlpb.StatsUserResponse, error)
 }
@@ -64,6 +66,27 @@ func RouteTask(
 			Remove: &controlpb.UserRemoveResponse{},
 		})
 
+	case *controlpb.Task_Renew:
+		var expires time.Time
+		if ts := body.Renew.GetExpiresAt(); ts != nil && ts.CheckValid() == nil {
+			expires = ts.AsTime()
+		}
+		log.Info("task received",
+			"op", "RENEW",
+			"driver_type", body.Renew.GetDriverType(),
+			"user_id", body.Renew.GetUserId(),
+			"expires_at", expires,
+		)
+
+		if err := handler.RenewUser(ctx, meta, body.Renew.GetUserId(), body.Renew.GetDriverType(), expires); err != nil {
+			return sendResp(send, meta.Seq, &controlpb.Response_Error{
+				Error: &controlpb.Error{Error: err.Error()},
+			})
+		}
+		return sendResp(send, meta.Seq, &controlpb.Response_Renew{
+			Renew: &controlpb.UserRenewResponse{},
+		})
+
 	case *controlpb.Task_StatsAll:
 		log.Info("task received", "op", "STATS_ALL")
 
@@ -104,6 +127,8 @@ func sendResp(send func(*controlpb.AgentToControl) error, seq uint64, body any) 
 	case *controlpb.Response_Upsert:
 		resp.Body = b
 	case *controlpb.Response_Remove:
+		resp.Body = b
+	case *controlpb.Response_Renew:
 		resp.Body = b
 	case *controlpb.Response_StatsAll:
 		resp.Body = b

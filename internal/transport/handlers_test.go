@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	controlpb "agent/api/control"
 	"agent/internal/domain"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type mockTaskHandlers struct {
@@ -44,6 +46,15 @@ type mockTaskHandlers struct {
 		resp   *controlpb.StatsUserResponse
 		err    error
 	}
+	renew struct {
+		called     bool
+		ctx        context.Context
+		meta       *domain.Meta
+		userID     string
+		driverType string
+		expiresAt  time.Time
+		err        error
+	}
 }
 
 func (f *mockTaskHandlers) UpsertUser(ctx context.Context, meta *domain.Meta, user *domain.User) (*controlpb.UserCreds, error) {
@@ -61,6 +72,16 @@ func (f *mockTaskHandlers) RemoveUser(ctx context.Context, meta *domain.Meta, us
 	f.remove.userID = userID
 	f.remove.driverType = driverType
 	return f.remove.err
+}
+
+func (f *mockTaskHandlers) RenewUser(ctx context.Context, meta *domain.Meta, userID, driverType string, expiresAt time.Time) error {
+	f.renew.called = true
+	f.renew.ctx = ctx
+	f.renew.meta = meta
+	f.renew.userID = userID
+	f.renew.driverType = driverType
+	f.renew.expiresAt = expiresAt
+	return f.renew.err
 }
 
 func (f *mockTaskHandlers) GetStatsAll(ctx context.Context, meta *domain.Meta) (*controlpb.StatsAllResponse, error) {
@@ -233,6 +254,76 @@ func TestRouteTaskRemove(t *testing.T) {
 		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
 		require.Len(t, sender.messages, 1)
 		assertError(t, sender.messages[0], seq, "remove failed")
+	})
+}
+
+func TestRouteTaskRenew(t *testing.T) {
+	ctx := context.Background()
+	seq := uint64(6)
+	meta := &controlpb.TaskMeta{RequestId: "req-renew", Seq: seq}
+	expires := time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC)
+
+	t.Run("success", func(t *testing.T) {
+		handler := &mockTaskHandlers{}
+		sender := &sendRecorder{}
+		task := &controlpb.Task{
+			Meta: meta,
+			Body: &controlpb.Task_Renew{Renew: &controlpb.UserRenewRequest{
+				UserId:     "user-7",
+				DriverType: "xray",
+				ExpiresAt:  timestamppb.New(expires),
+			}},
+		}
+
+		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
+		require.True(t, handler.renew.called)
+
+		wantMeta := &domain.Meta{RequestID: meta.GetRequestId(), Seq: meta.GetSeq()}
+		assert.Equal(t, wantMeta, handler.renew.meta)
+		assert.Equal(t, "user-7", handler.renew.userID)
+		assert.Equal(t, "xray", handler.renew.driverType)
+		assert.True(t, handler.renew.expiresAt.Equal(expires))
+
+		require.Len(t, sender.messages, 1)
+		resp := responseFrom(t, sender.messages[0])
+		assert.Equal(t, seq, resp.GetMeta().GetSeq())
+		_, ok := resp.Body.(*controlpb.Response_Renew)
+		require.True(t, ok, "expected Response_Renew, got %T", resp.Body)
+	})
+
+	t.Run("handler error", func(t *testing.T) {
+		handler := &mockTaskHandlers{}
+		handler.renew.err = errors.New("renew failed")
+		sender := &sendRecorder{}
+		task := &controlpb.Task{
+			Meta: meta,
+			Body: &controlpb.Task_Renew{Renew: &controlpb.UserRenewRequest{
+				UserId:     "user-7",
+				DriverType: "xray",
+				ExpiresAt:  timestamppb.New(expires),
+			}},
+		}
+
+		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
+		require.Len(t, sender.messages, 1)
+		assertError(t, sender.messages[0], seq, "renew failed")
+	})
+
+	t.Run("nil expires_at", func(t *testing.T) {
+		handler := &mockTaskHandlers{}
+		sender := &sendRecorder{}
+		task := &controlpb.Task{
+			Meta: meta,
+			Body: &controlpb.Task_Renew{Renew: &controlpb.UserRenewRequest{
+				UserId:     "user-7",
+				DriverType: "xray",
+				ExpiresAt:  nil,
+			}},
+		}
+
+		require.NoError(t, RouteTask(ctx, handler, task, sender.send))
+		require.True(t, handler.renew.called)
+		assert.True(t, handler.renew.expiresAt.IsZero(), "nil proto timestamp must map to zero time.Time")
 	})
 }
 

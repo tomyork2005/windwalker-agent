@@ -26,6 +26,7 @@ message Empty {}
 
 message UserUpsertRequest {User user = 1;}
 message UserRemoveRequest {string user_id = 1; string driver_type = 2;}
+message UserRenewRequest {string user_id = 1; string driver_type = 2; google.protobuf.Timestamp expires_at = 3;}
 message StatsAllRequest {}
 message StatsUserRequest {string user_id = 1;}
 
@@ -37,6 +38,7 @@ message Task {
     UserRemoveRequest  remove = 3;
     StatsAllRequest stats_all = 4;
     StatsUserRequest stats_user = 5;
+    UserRenewRequest  renew = 6;
   }
 }
 
@@ -51,6 +53,7 @@ message ControlToAgent {
 
 message UserUpsertResponse {UserCreds creds = 1;}
 message UserRemoveResponse {}
+message UserRenewResponse {}
 message StatsAllResponse {repeated UserStat users = 1; uint64 total_bytes_rx = 2; uint64 total_bytes_tx = 3;}
 message StatsUserResponse {UserStat stat = 1;}
 
@@ -73,6 +76,7 @@ message Response {
     StatsUserResponse stats_user = 5;
 
     Error error = 6;
+    UserRenewResponse  renew = 7;
   }
 }
 
