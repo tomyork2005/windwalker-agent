@@ -1,28 +1,22 @@
-env: "prod"
+env: prod
+agent_id: ""                       # required: stable identity of this node, set via deploy.sh
 
-transport_grpc:
-  address: "himura.tech:50051"     # gRPC address control_plane
-  agent_id: "LV-1"                 # welcome from server
-  instance_id: ""                  # generated in every start
-  region: "LV"                     # ISO alpha-2 country code
-  version: "1.0.0"                 # agent version
-  driver_types: [ "xray" ]
-
-  heartbeat_period: 20s
-  send_queue_size: 128
-  reconnect_min: 500ms
-  reconnect_max: 10s
-  dial_timeout: 5s
+storage:
+  path: /var/lib/skywalker-agent/agent.db
+  busy_timeout: 5s
+  wal: true
+  synchronous_full: false
+  foreign_keys: true
 
 driver_xray:
-  service_name: xray               # systemd unit
-  api_addr: 127.0.0.1:10085        # xray grpc api address
+  api_addr: 127.0.0.1:10085        # xray gRPC API address (proxyman/stats)
   inbound_tag: vless-in
-  protocol: vless                  # vless | vmess
-  vless_flow: xtls-rprx-vision
-  op_timeout: 3s                   # deadline on RPC
+  op_timeout: 5s
+  flow: xtls-rprx-vision
+  level: 0
 
-  # REALITY client-facing params used to build VlessCreds for control-plane.
+  # REALITY client-facing params used to build VLESS URI for control-plane.
+  # All four below are filled by deploy.sh on the host.
   public_host: ""                  # routable address of this node (IP or domain)
   port: 443
   sni: ""                          # fake SNI domain (REALITY serverNames[0])
@@ -30,9 +24,18 @@ driver_xray:
   short_id: ""                     # REALITY shortId (hex)
   fingerprint: chrome
 
-storage_sqlite:
-  path: ./data/agent.db
-  busy_timeout: 5s
-  wal: true
-  synchronous_full: false
-  foreign_keys: true
+transport:
+  address: ""                      # required: host:port of control plane
+  region: ""                       # ISO alpha-2 country code, optional
+  version: ""                      # build version, optional
+
+  send_queue_size: 128
+  reconnect_min: 1s
+  reconnect_max: 60s
+  dial_timeout: 5s
+
+worker:
+  task_poll_interval: 1s
+  stats_interval: 30s
+  sync_interval: 1m
+  task_batch_limit: 32

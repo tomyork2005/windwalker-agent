@@ -1,79 +1,117 @@
 package config
 
 import (
-	"github.com/google/uuid"
-	"log"
+	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ilyakaznacheev/cleanenv"
 )
 
 type Config struct {
-	Env                 string `yaml:"env" env-default:"local"`
-	SQLiteConfig        `yaml:"storage_sqlite"`
-	XrayConfig          `yaml:"driver_xray"`
-	TransportGrpcConfig `yaml:"transport_grpc"`
+	Env        string              `yaml:"env"        env:"AGENT_ENV"   env-default:"prod"`
+	AgentID    string              `yaml:"agent_id"   env:"AGENT_ID"`
+	Storage    SQLiteConfig        `yaml:"storage"`
+	DriverXray XrayConfig          `yaml:"driver_xray"`
+	Transport  TransportGrpcConfig `yaml:"transport"`
+	Worker     WorkerConfig        `yaml:"worker"`
 }
 
 type SQLiteConfig struct {
-	Path            string        `yaml:"path" env-default:"./data/agent.db"`
-	BusyTimeout     time.Duration `yaml:"busy_timeout" env-default:"5s"`
-	Wal             bool          `yaml:"wal" env-default:"true"`
+	Path            string        `yaml:"path"             env-default:"/var/lib/skywalker-agent/agent.db"`
+	BusyTimeout     time.Duration `yaml:"busy_timeout"     env-default:"5s"`
+	Wal             bool          `yaml:"wal"              env-default:"true"`
 	SynchronousFull bool          `yaml:"synchronous_full" env-default:"false"`
-	ForeignKeys     bool          `yaml:"foreign_keys" env-default:"false"`
+	ForeignKeys     bool          `yaml:"foreign_keys"     env-default:"true"`
 }
 
 type XrayConfig struct {
-	ServiceName string        `yaml:"service_name" env-default:"xray"`
-	APIAddr     string        `yaml:"api_addr" env-default:"127.0.0.1:10085"`
-	InboundTag  string        `yaml:"inbound_tag" env-default:"vless-in"`
-	Protocol    string        `yaml:"protocol" env-default:"vless"`
-	OpTimeout   time.Duration `yaml:"op_timeout" env-default:"5s"`
-	VlessFlow   string        `yaml:"vless_flow" env-default:"xtls-rprx-vision"`
+	APIAddr    string        `yaml:"api_addr"    env-default:"127.0.0.1:10085"`
+	InboundTag string        `yaml:"inbound_tag" env-default:"vless-in"`
+	OpTimeout  time.Duration `yaml:"op_timeout"  env-default:"5s"`
+	Flow       string        `yaml:"flow"        env-default:"xtls-rprx-vision"`
+	Level      uint32        `yaml:"level"       env-default:"0"`
 
-	// REALITY client-facing parameters, used to build VlessCreds for control-plane.
-	// PublicHost is the routable address of this node (IP or domain);
-	// SNI is the masquerade domain REALITY impersonates (differs from PublicHost).
-	PublicHost  string `yaml:"public_host" env:"AGENT_PUBLIC_HOST"`
-	Port        uint32 `yaml:"port" env-default:"443"`
+	PublicHost  string `yaml:"public_host"  env:"AGENT_PUBLIC_HOST"`
+	Port        uint32 `yaml:"port"         env-default:"443"`
 	SNI         string `yaml:"sni"`
 	PublicKey   string `yaml:"public_key"`
 	ShortID     string `yaml:"short_id"`
-	Fingerprint string `yaml:"fingerprint" env-default:"chrome"`
+	Fingerprint string `yaml:"fingerprint"  env-default:"chrome"`
 }
 
 type TransportGrpcConfig struct {
-	Address     string   `yaml:"address" env-default:""`
-	AgentID     string   `yaml:"agent_id" env-default:""`
-	InstanceID  string   `yaml:"instance_id" env-default:""`
-	Region      string   `yaml:"region" env-default:""`
-	Version     string   `yaml:"version" env-default:""`
-	DriverTypes []string `yaml:"driver_types" env-default:"xray"`
+	Address       string        `yaml:"address"`
+	AgentID       string        `yaml:"-"`
+	InstanceID    string        `yaml:"-"`
+	Region        string        `yaml:"region"`
+	Version       string        `yaml:"version"`
+	SendQueueSize int           `yaml:"send_queue_size" env-default:"128"`
+	ReconnectMin  time.Duration `yaml:"reconnect_min"   env-default:"1s"`
+	ReconnectMax  time.Duration `yaml:"reconnect_max"   env-default:"60s"`
+	DialTimeout   time.Duration `yaml:"dial_timeout"    env-default:"5s"`
+}
 
-	HeartbeatPeriod time.Duration `yaml:"heartbeat_period" env-default:"5s"`
-	SendQueueSize   int           `yaml:"send_queue_size" env-default:"0"`
-	ReconnectMin    time.Duration `yaml:"reconnect_min" env-default:"5s"`
-	ReconnectMax    time.Duration `yaml:"reconnect_max" env-default:"5s"`
-	DialTimeout     time.Duration `yaml:"dial_timeout" env-default:"5s"`
+// Field order, names and types must mirror service.WorkerConfig so the struct
+// is convertible (service.WorkerConfig(cfg.Worker)) — keeps service decoupled
+// from this package while still letting cmd wire it from YAML.
+type WorkerConfig struct {
+	TaskPollInterval time.Duration `yaml:"task_poll_interval" env-default:"1s"`
+	StatsInterval    time.Duration `yaml:"stats_interval"     env-default:"30s"`
+	SyncInterval     time.Duration `yaml:"sync_interval"      env-default:"1m"`
+	TaskBatchLimit   int           `yaml:"task_batch_limit"   env-default:"32"`
+	AgentID          string        `yaml:"-"`
 }
 
 func MustLoadConfig() *Config {
-	configEnv := os.Getenv("CONFIG_PATH")
-	if configEnv == "" {
-		log.Fatal("configs path can`t be empty")
+	path := os.Getenv("CONFIG_PATH")
+	if path == "" {
+		fatal("CONFIG_PATH env is empty")
+	}
+	if _, err := os.Stat(path); err != nil {
+		fatal("CONFIG_PATH is unreadable", "path", path, "err", err)
 	}
 
-	if _, err := os.Stat(configEnv); os.IsNotExist(err) {
-		log.Fatalf("configs file doesn't exist %s", err)
+	var cfg Config
+	if err := cleanenv.ReadConfig(path, &cfg); err != nil {
+		fatal("read config failed", "path", path, "err", err)
 	}
 
-	var config Config
-	if err := cleanenv.ReadConfig(configEnv, &config); err != nil {
-		log.Fatalf("fail with read configs %s", err)
+	if err := validate(&cfg); err != nil {
+		fatal("config validation failed", "err", err)
 	}
 
-	config.InstanceID = uuid.NewString()
+	cfg.Transport.AgentID = cfg.AgentID
+	cfg.Worker.AgentID = cfg.AgentID
+	cfg.Transport.InstanceID = uuid.NewString()
 
-	return &config
+	return &cfg
+}
+
+func validate(c *Config) error {
+	required := []struct {
+		field string
+		value string
+	}{
+		{"agent_id", c.AgentID},
+		{"transport.address", c.Transport.Address},
+		{"driver_xray.public_host", c.DriverXray.PublicHost},
+		{"driver_xray.sni", c.DriverXray.SNI},
+		{"driver_xray.public_key", c.DriverXray.PublicKey},
+		{"driver_xray.short_id", c.DriverXray.ShortID},
+		{"storage.path", c.Storage.Path},
+	}
+	for _, r := range required {
+		if r.value == "" {
+			return fmt.Errorf("%s is required", r.field)
+		}
+	}
+	return nil
+}
+
+func fatal(msg string, args ...any) {
+	slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error(msg, args...)
+	os.Exit(1)
 }

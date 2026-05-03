@@ -4,103 +4,200 @@
 
 ## Проект
 
-Skywalker VPN **agent** — Go-сервис, запускаемый на каждой VPN-ноде. Управляет локальными сетевыми драйверами (сейчас только Xray) по командам удалённого контрол-плейна. Имя Go-модуля — `agent` (см. `go.mod`), поэтому все внутренние импорты идут через `agent/internal/...` — переименовывать нельзя.
+Skywalker VPN **agent** — Go-сервис, запускаемый на каждой VPN-ноде. Управляет локальным Xray по командам удалённого контрол-плейна. Имя Go-модуля — `agent` (см. `go.mod`), все внутренние импорты идут через `agent/internal/...` — переименовывать нельзя.
 
 Контрол-плейн живёт в соседнем репозитории: `C:\Users\Handi\GolandProjects\windwalker-controlplane`. Прото-файл `api/control/control.proto` — общий, синхронизирован в обоих репах вручную; при правке прото нужно регенерировать код в обоих местах.
 
 ## Команды
 
-Сборка / запуск / тесты (формы, дружественные к PowerShell):
+Сборка / запуск / тесты — всё дерево зелёное:
 
 ```
 go build ./...
-go build -o ./bin/skywalker-agent ./cmd/agent
-go build -o ./bin/xray-status ./cmd/xray-status
-
-go test ./...
-go test ./internal/service -run TestService_UpsertUser -v
-go test ./internal/service -run TestService_RemoveUser -v
-
+go test ./internal/drivers/xray ./internal/storage ./internal/service ./internal/transport -v
 go vet ./...
 ```
 
-Локальный запуск агента требует переменной `CONFIG_PATH`, указывающей на YAML-конфиг — `config.MustLoadConfig` зовёт `log.Fatal`, если переменная не задана или файла нет:
+Локальный запуск агента требует переменной `CONFIG_PATH`, указывающей на YAML-конфиг — `config.MustLoadConfig` пишет `slog.Error` и зовёт `os.Exit(1)`, если переменная не задана, файла нет или обязательное поле пустое (`agent_id`, `transport.address`, `driver_xray.public_host/sni/public_key/short_id`, `storage.path`):
 
 ```
-CONFIG_PATH=./config/config.yaml go run ./cmd/agent
+CONFIG_PATH=./config/config.yaml go run ./cmd
 ```
 
-Регенерация gRPC-кода из прото (`api/control/control.proto`):
+Накатить миграции (нужно перед первым запуском и после правок схемы — код агента их **не катит**):
 
 ```
-protoc --go_out=. --go-grpc_out=. api/control/control.proto
+goose -dir migrations sqlite3 ./data/agent.db up
 ```
 
-Деплой на Linux-хост (ставит Go при необходимости, Xray, конфиги, собирает агента, ставит systemd-юнит):
+Регенерация gRPC-кода из прото (`api/control/control.proto`). Опции `paths=source_relative` обязательны — иначе protoc уйдёт по `option go_package = "control/api/control;..."` и сложит файлы в посторонний `control/` каталог:
 
 ```
-sudo CONTROL_PLANE_ADDR=<host:port> XRAY_DOMAIN=<domain> ./deploy/bootstrap-host.sh
+protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative api/control/control.proto
+```
+
+Регенерация моков (`internal/service/mocks/`, `internal/transport/mocks/`):
+
+```
+go generate ./internal/service ./internal/transport
+```
+
+One-command деплой на чистую Linux-VPS (ставит Go ≥ 1.25 при необходимости, Xray, goose; генерит REALITY-ключи, патчит `config/config.yaml`, собирает агента, накатывает миграции, ставит и запускает systemd-юниты):
+
+```
+sudo XRAY_DOMAIN=<domain> CONTROL_PLANE_ADDR=<host:port> AGENT_ID=<node-id> ./deploy.sh
 ```
 
 ## Архитектура
 
-Агент — это **один долгоживущий клиент**, который коннектится к контрол-плейну, принимает таски и применяет их к одному или нескольким сетевым драйверам. Слои сверху вниз:
+Агент — это **один долгоживущий клиент**, который коннектится к контрол-плейну, принимает таски и применяет их к локальному Xray. Слои:
 
-1. **`cmd/agent/main.go`** — composition root. Связывает storage → driver → multiplexer → service → transport и блокируется на `transportClient.Run`.
-2. **`internal/transport`** — gRPC-клиент для `api/control` (`ControlPlaneClient.Workstream`, bidi-стрим). `Run` → цикл `runOnce` с экспоненциальным backoff'ом для реконнекта; `runOnce` шлёт `AgentHello`, затем поднимает `writer` (heartbeat'ы + очередь сообщений `AgentToControl`) и `reader` (приём `Welcome` / `Task`). Входящие `Task` декодируются в `RouteTask` (`handlers.go`), который вызывает методы `TaskHandlers` и отвечает `Ack`/`Nack` через очередь отправки. `Welcome.agent_id` записывается обратно в `cfg` и пробрасывается в глобальный slog-контекст через `logx.Set`.
-3. **`internal/service`** — бизнес-логика. `Service` реализует `transport.TaskHandlers`. Любая мутирующая операция выполняется внутри `TxManager.WithTx`, проверяет `meta.Seq` против `GetLastAppliedSeq` (если уже применена — пропускаем; это **контракт идемпотентности** с контрол-плейном), применяет изменение к драйверу, потом к storage, потом сдвигает `last_applied_seq`. Этот порядок (driver → storage → seq) обязателен при расширении.
-4. **`internal/driver`** — интерфейс `Driver` (`Name/Upsert/Remove/BuildCreds`) и `Multiplexer`, который маршрутизирует по `user.DriverType`. `XrayDriver` общается с локальным Xray двумя путями: через `systemctl` — для жизненного цикла, и через собственные gRPC API Xray (`proxyman/command` для add/remove юзеров на inbound-теге, `stats/command` для счётчиков). Xray идентифицирует юзеров по **email**, и в этом коде сознательно используется `user.ID` (UUID) в качестве email.
-5. **`internal/storage`** — sqlite на `modernc.org/sqlite` (чистый Go, без CGO). Схема живёт в `initSQLiteSchema`, версионируется через `PRAGMA user_version`: чтобы добавить миграцию, продли цепочку `switch ver` и бампни версию в конце своего кейса. `TxManager.WithTx` кладёт `*sql.Tx` в контекст; `Storage.ex(ctx)` прозрачно подбирает либо tx, либо голую DB — один и тот же метод `Storage` работает и внутри транзакции, и снаружи. Пул соединений жёстко зафиксирован на `MaxOpenConns(1)`, потому что у sqlite один писатель — поднимать нельзя.
-6. **`internal/logx`** — тонкая обёртка над `log/slog` с глобальным логгером в `atomic.Value`. Используй `logx.Info/Error/Debug` для разовых записей, `logx.With(...)` — для per-операционных child-логгеров, `logx.Set(...)` — для добавления ключей в глобальную базу (транспорт это делает после `Welcome`).
-7. **`internal/config`** — YAML-загрузчик на cleanenv. `MustLoadConfig` генерирует свежий UUID `InstanceID` на каждый старт; `AgentID` приходит с сервера через `Welcome`, в конфиге его нет.
+1. **`cmd/main.go`** — composition root. Грузит конфиг, ставит slog JSON-handler как default, поднимает `signal.NotifyContext(SIGINT|SIGTERM)`, конструирует storage → driver → service → transport, гоняет `service.Run` и `transport.Run` под `errgroup.WithContext`. На отмену контекста — корректное завершение через defer'ы `Close()`.
+2. **`internal/transport`** — gRPC-клиент для `api/control` (`ControlPlaneClient.Workstream`, bidi-стрим): `AgentHello` → `Welcome` → поток `Task` (upsert/remove) с ответами `Response` и периодическими `Stats` (top-level). Реконнект с экспоненциальным backoff'ом. Реализует `service.Sender`, чтобы worker мог писать ack'и/ошибки/stats прямо в исходящий стрим. См. раздел «Транспорт» ниже.
+3. **`internal/service`** — бизнес-логика поверх воркера. `Service` принимает входящие команды от транспорта (`UpsertUser`, `DeleteTask`) и кладёт их в БД через `TaskRepo.SaveTask`; всю работу по применению тасок к Xray и периодическим лупам делает `Worker` (см. раздел «Воркер» ниже). Идемпотентность — по `request_id` из `Task` (это PK таблицы `tasks`).
+4. **`internal/drivers/xray`** — текущая, актуальная реализация драйвера Xray (см. ниже). Лаконичный публичный интерфейс через методы `*Driver`, без обёртки-мультиплексера: агент работает только с одним драйвером.
+5. **`internal/storage`** — sqlite на `modernc.org/sqlite` (чистый Go, без CGO). Реализует `service.TaskRepo` целиком: `SaveTask`/`PullPendingTasks`/`MarkDone`/`MarkFailed`/`ListUserIDs`/`UpsertUser`/`DeleteUser`. Схема живёт в `migrations/` (см. раздел «Схема БД» ниже), формат — goose (`-- +goose Up` / `-- +goose Down`); миграции **катаются снаружи** через goose CLI — код агента их не применяет. Пул соединений жёстко зафиксирован на `MaxOpenConns(1)`, потому что у sqlite один писатель — поднимать нельзя. Чтения мапятся через `github.com/georgysavva/scany/v2/sqlscan` (аналог `pgxscan` для `database/sql`); записи — обычный `db.ExecContext`. Транзакций наружу не выставляется (никакого `TxManager`).
+6. **`internal/model`** — общие доменные типы (`User`, `UserUsage`, `Task`, `TaskKind`, `OutboundUpsert`/`OutboundRemove`/`OutboundError`/`OutboundStats`); используется драйвером, сервисом и транспортом, чтобы не тащить proto-типы наружу.
+7. **`internal/config`** — YAML-загрузчик на cleanenv, всё логирование через `log/slog` (никаких `log.Fatal`). Структура `Config` плоская: верхнеуровневые `Env`/`AgentID` плюс четыре под-конфига — `Storage` (`SQLiteConfig`), `DriverXray` (`XrayConfig`), `Transport` (`TransportGrpcConfig`), `Worker` (`WorkerConfig`). `MustLoadConfig` валидирует обязательные поля (`agent_id`, `transport.address`, REALITY-параметры в `driver_xray`, `storage.path`), генерирует свежий `InstanceID` (UUID) на каждый старт и копирует `cfg.AgentID` в `cfg.Transport.AgentID` и `cfg.Worker.AgentID`. Поля `WorkerConfig` совпадают по порядку/именам/типам со `service.WorkerConfig` — в `cmd/main.go` идёт через прямую конверсию `service.WorkerConfig(cfg.Worker)`. `Welcome.agent_id` транспорт сейчас только логирует и НЕ пробрасывает обратно в worker — при расхождении `cfg.AgentID` и серверного будет mismatch в `OutboundStats.AgentID` (известное ограничение, ждёт agent_id discovery).
 8. **`api/control`** — сгенерированный protobuf/gRPC для `vpn.control.v1.ControlPlane`. Агент — клиент, контрол-плейн — отдельный репозиторий.
 
-### Поток сообщений по сети
+### Поток сообщений по сети (новый контракт)
 
 ```
-Agent  --AgentHello-->                Control
-Agent  <--Welcome{agent_id}--         Control
-Agent  <--Task{upsert|remove|stats}-- Control   (повторяется)
-Agent  --Ack{seq} или Nack{seq,err}--> Control
-Agent  --Heartbeat{agent_id,uptime}-> Control   (каждые heartbeat_period)
-Agent  --StatsAll / StatsUser------>  Control   (в ответ на stats-таски)
+Agent  --AgentHello-->                  Control
+Agent  <--Welcome{agent_id}--           Control
+Agent  <--Task{upsert|remove}--         Control   (повторяется)
+Agent  --Response{request_id, ...}-->   Control
+Agent  --Stats{users[]}-->              Control   (top-level, периодически)
 ```
 
-Каждый серверный `Task` несёт `TaskMeta.seq`; агент обязан либо ack'нуть, либо nack'нуть с тем же seq. Seq монотонен per-agent и используется для dedup при реконнекте.
+Идемпотентность транспорта — `request_id` per-task; повтор той же таски при реконнекте безопасен.
 
-### Два бинарника
+## Драйвер Xray (`internal/drivers/xray`)
 
-- **`cmd/agent`** — основной демон, описанный выше.
-- **`cmd/xray-status`** — отдельная диагностическая CLI, ходит на HTTP-эндпойнт `/stats` (не Xray gRPC API — это отдельный listener, конфигурируется вне этого репо). Читает `XRAY_LISTENER__API_BASE` / `XRAY_LISTENER_API_TOKEN` или флаги `--base` / `--token`. К рантайму агента отношения не имеет.
+Публичный API — методы `*xray.Driver`:
 
-## Интеграция с контрол-плейном
+```go
+AddUser(ctx, userID string) error
+RemoveUser(ctx, userID string) error
+ListUsers(ctx) ([]string, error)              // вернёт UUIDы
+CollectStats(ctx) ([]*model.UserUsage, error) // абсолютные cumulative-счётчики
+BuildCreds(userID string) (string, error)     // готовая vless://... строка
+Close() error
+```
 
-Контрол-плейн (`windwalker-controlplane`) — Go-сервис на Postgres + bidi gRPC. По биллингу/подпискам он ведёт `subscriptions`; на стороне агента ведёт `agents`, `agent_tasks` (очередь команд), `agent_seq` (per-agent счётчик), `outbox_events` (transactional outbox).
+Драйвер общается **только с уже работающим** Xray по его gRPC API (`proxyman/command` для add/remove/list юзеров на inbound-теге, `stats/command` для счётчиков). `systemctl`/жизненный цикл процесса — забота оператора и `deploy.sh`, не драйвера.
 
-**Поток `Remove` (отмена подписки → удаление из Xray):**
+### Email convention
 
-1. Подписка отменяется (TG-бот / истечение / админ) → запись `subscription_cancelled` в `outbox_events`.
-2. `internal/workers/worker.go` каждые 3 секунды поллит outbox и для `EventTypeSubscriptionCancelled` зовёт `AgentSender.StopUserSubscribe` (`internal/service/agent-sender.go:77`).
-3. `AgentSender` находит `agent_id` через активную подписку юзера и зовёт `Dispatcher.DispatchRemove` (`internal/service/dispatcher.go:75`).
-4. `Dispatcher` под транзакцией: `NextSeq(agent_id)` (атомарный INSERT/UPDATE на `agent_seq`) + `EnqueueTask` со сложенным `AgentRemovePayload{UserID, DriverType}` в `agent_tasks` (kind=`remove`). Параллельно отдаёт операцию в in-memory `Hub` сессии — если агент онлайн, шлётся сразу.
-5. На реконнекте `RecoverPending` подтягивает все таски с `done_at IS NULL` и `retries < 10`, шлёт повторно. Авторетраев через таймер нет — только при новом коннекте.
-6. Прото `UserRemoveRequest{user_id, driver_type}` собирается в `internal/transport/agent/converter.go:53`. На уровне агента: `RouteTask` (`handlers.go:51`) → `Service.RemoveUser` (`service/service.go:106`) → `Multiplexer.Remove` (`driver/multiplexer.go:38`) → `XrayDriver.Remove` (`driver/xray.go:137`), который вызывает `proxyman.HandlerService.AlterInbound` с `RemoveUserOperation{Email: userID}`. Затем `Storage.RemoveUser` (`DELETE FROM users WHERE id=?`) и `SetLastAppliedSeq`.
-7. Агент шлёт `Response_Remove{}` (пустой) с тем же `meta.seq`. На стороне контрол-плейна `MarkTaskAck` ставит `done_at`, `ok=true` в `agent_tasks`.
+Xray идентифицирует юзеров по строке email. Драйвер хранит соответствие `userID ↔ email` через жёсткий шаблон `<userID>@xray.com` — функции `emailFor` / `userIDFromEmail` в `xray.go`. `ListUsers` тихо пропускает юзеров с email вне этого шаблона (логирует `slog.Warn`), чтобы не считать «чужих» (вставленных мимо агента) своими.
 
-**Идемпотентность:**
-- `meta.seq` — транспортная: на агенте сравнивается с `last_applied_seq`, при `seq <= last` таска тихо игнорируется.
-- `meta.request_id` — бизнес: на стороне контрол-плейна это `subscription_id`. Агент эту ось пока не использует.
+### Идемпотентность
 
-**Известные пробелы по `Remove` (на 2026-04-28):**
-- `XrayDriver.Remove` не покрыт юнит-тестами (в `xray_test.go` есть только тесты `BuildCreds`).
-- Сценарий «driver OK, storage DELETE падает» откатит транзакцию, но в Xray юзер уже удалён → состояния разъедутся. Компенсации нет.
-- Ошибки от Xray не различаются по типу: «юзера нет» (что для `Remove` фактически идемпотентно) идёт как ошибка и превращается в Nack.
-- `XrayDriver.ListUsers` намеренно возвращает ошибку — сверки реального состояния Xray с storage нет.
-- На стороне контрол-плейна обработчик `Response_Remove` в `internal/transport/agent/server.go` помечен как «not implemented yet» — это требует проверки/фикса в репо контрол-плейна, иначе таски `remove` могут не закрываться в `agent_tasks` после успешного ack'а.
+- **`AddUser`** — сначала `GetInboundUsers(tag, email)`; если юзер уже есть — возвращаем `nil`. Дополнительная страховка от race: если `AlterInbound` вернул ошибку с подстрокой `"already"` (case-insensitive) → `nil`.
+- **`RemoveUser`** — если `AlterInbound` вернул ошибку с подстрокой `"not found"` → `nil`. Это решает классический race «юзер уже удалён, но контрол-плейн перепосылает».
+- **`CollectStats`** — `Reset_=false`, отдаёт абсолютные cumulative-счётчики Xray (с момента старта процесса); вычисление дельт за окно — обязанность вызывающего слоя. `IPCount` — снимок «сейчас» через `GetStatsOnlineIpList` per user; `codes.NotFound` → `0`.
+- **`BuildCreds`** — чистая функция от `cfg + userID`; результат — VLESS+REALITY URI без fragment'а.
+
+Подстрочный matching ошибок Xray (`errMatches` в `xray.go`) — необходимое зло: gRPC API Xray не возвращает структурированных кодов для «уже есть» / «не найдено».
+
+### Конфиг (`config.XrayConfig`)
+
+Поля:
+- `APIAddr`, `InboundTag`, `OpTimeout` — параметры подключения и тайм-аут per-RPC.
+- `Flow`, `Level` — параметры юзера на стороне Xray (`vless.Account.Flow`, `protocol.User.Level`); единые для всех юзеров этого инбаунда.
+- `PublicHost`, `Port`, `SNI`, `PublicKey`, `ShortID`, `Fingerprint` — REALITY client-facing параметры; используются в `BuildCreds` для генерации URI.
+
+Всё, что относилось к `systemctl` и протоколам помимо vless, удалено из конфига сознательно. Драйвер работает **только с VLESS+Vision+REALITY**.
+
+### Структура пакета
+
+- `xray.go` — `Driver` struct, `New`, `Close`, email helpers, `errMatches`, константа `emailDomain`.
+- `users.go` — `AddUser`, `RemoveUser`, `ListUsers`.
+- `stats.go` — `CollectStats`, `parseStatName`, `fetchOnlineIPCount`.
+- `creds.go` — `BuildCreds`.
+- `*_test.go` — табличные юнит-тесты на pure-функции (`emailFor`/`userIDFromEmail`/`parseStatName`/`BuildCreds`). gRPC-методы (`AddUser`/`RemoveUser`/`ListUsers`/`CollectStats`) юнит-тестами **не покрыты** — будут покрыты интеграционными тестами против живого Xray в отдельной итерации.
+
+## Транспорт (`internal/transport`)
+
+Один долгоживущий `Client`, конструируется через `transport.New(cfg, log)`. Имплементирует `service.Sender`, поэтому передаётся в `NewAgentService` как зависимость. `Run(ctx, svc Service)` блокируется до отмены ctx; внутри — reconnect-цикл с экспоненциальным backoff'ом (`ReconnectMin` ↑×2 до `ReconnectMax`).
+
+Каждая «сессия» — это: `connect` (ленивый dial, один `*grpc.ClientConn` живёт между сессиями) → `Workstream` → `sendHello` → `recvWelcome` → `errgroup` с двумя горутинами:
+
+- **`writer`** дренит общий буферизованный канал `sendQ` (`SendQueueSize` или дефолт 128) и шлёт в `stream.Send`. На ctx-cancel — `CloseSend()` и выход. Известное окно потерь: сообщение, выдернутое из канала и упавшее на `Send`, не восстанавливается; worker ретраит upsert/remove через таблицу `tasks`, а stats периодические — допустимо.
+- **`reader`** читает входящие `ControlToAgent`. После `recvWelcome` (он жуётся синхронно до старта горутин) reader ждёт только `Task`'ов; всё остальное (включая повторный Welcome) попадает в `default` switch'а и тихо логируется как `unknown control message`.
+
+`Sender`-методы (`SendUpsertAck`/`SendRemoveAck`/`SendError`/`SendStats`) — все по одному паттерну: `model → proto → enqueue`. `enqueue` — `select` на `c.sendQ <- m` vs `<-ctx.Done()`; backpressure by design (полная очередь блокирует worker, ctx разблокирует). Никакого non-blocking `default`-кейса не нужно.
+
+Маршрутизация входящих тасок — `handleTask`: `Task_Upsert` → `svc.UpsertUser`, `Task_Remove` → `svc.DeleteTask`. Если service вернул ошибку (это значит `repo.SaveTask` упал, таска НЕ легла нам в очередь) — синтезируем `Response{request_id, error}` через `SendError` и кладём в очередь; reader не выходит.
+
+### Структура пакета
+
+- `client.go` — `Client` struct, интерфейс `Service` (то, что транспорт зовёт наружу — `UpsertUser`/`DeleteTask`), `New`, `Run`, `runSession`, `connect`/`closeConn`, `sendHello`/`recvWelcome`, `reader`/`writer`, `handleControlMessage`/`handleTask`, `nextBackoff`.
+- `sender.go` — 4 метода `Sender` + `enqueue`.
+- `convert.go` — чистые конвертеры `proto ↔ model` (`userFromProto`, `upsertAckToProto`, `removeAckToProto`, `errorToProto`, `statsToProto`).
+- `genmocks.go` (build tag `generate`) — minimock-директива на `Service`. Моки в `internal/transport/mocks/`.
+- `convert_test.go` — табличные тесты конвертеров через `proto.Equal`.
+- `sender_test.go` — drain-the-channel: вызвал `SendX`, прочитал из `sendQ`, сравнил `proto.Equal` (без моков). Плюс кейсы на ctx-cancel и full-queue-blocking.
+- `router_test.go` — табличные тесты `handleControlMessage` с `ServiceMock` — стиль ровно как в `internal/service/worker_test.go` (helper'ы для моков и клиента, `t.Parallel`, `Expect().Return()`).
+- `client_test.go` — bufconn end-to-end happy path: in-process gRPC-сервер, hello/welcome handshake, Task → Response roundtrip через инжект `ServiceMock`. Запуск с `-race` требует CGO.
+
+## Воркер (`internal/service`)
+
+`Worker.Run(ctx)` через `errgroup` поднимает три параллельных тикера; падение любого валит всю группу.
+
+1. **Task loop** (`TaskPollInterval`, default 1s) — `repo.PullPendingTasks(limit)` → для каждой таски `processTask`:
+   - `TaskUpsert`: `driver.AddUser(userID)` → `driver.BuildCreds(userID)` → `repo.UpsertUser(userID, driverType)` → `sender.SendUpsertAck`.
+   - `TaskRemove`: `driver.RemoveUser(userID)` → `repo.DeleteUser(userID, driverType)` → `sender.SendRemoveAck`.
+   - На ошибке любого шага: `sender.SendError` + `repo.MarkFailed(requestID, err)`. Failed-таска **терминальна**, ретраев нет — `PullPendingTasks` фильтрует `done_at IS NULL AND failed_at IS NULL`.
+   - На успехе: `repo.MarkDone(requestID)`.
+
+   Порядок шагов «driver → repo → ack» специально: драйвер — источник правды о реальном состоянии Xray, repo — наша durable-копия, ack — самый внешний шаг.
+2. **Stats loop** (`StatsInterval`, default 30s) — `driver.CollectStats` → `sender.SendStats` (top-level Stats в исходящий стрим, с `AgentID` и `UptimeSeconds` от старта воркера).
+3. **Sync loop** (`SyncInterval`, default 1m) — сверяет `repo.ListUserIDs` с `driver.ListUsers` через `diffUserSets` и фиксит дрифт: чего нет в Xray — `AddUser`, чего нет в БД — `RemoveUser`. Это страховка от расхождения между sqlite и состоянием Xray (рестарт ноды, ручная правка).
+
+Зависимости воркера — три интерфейса в `worker.go`:
+
+- `XrayDriver` — реализуется `internal/drivers/xray.Driver`.
+- `TaskRepo` — реализуется `internal/storage.Storage` (`SaveTask`/`PullPendingTasks`/`MarkDone`/`MarkFailed`/`ListUserIDs`/`UpsertUser`/`DeleteUser`).
+- `Sender` — реализуется `*transport.Client` (`SendUpsertAck`/`SendRemoveAck`/`SendError`/`SendStats`); технически кладёт сообщение в `sendQ`, оттуда writer-горутина транспорта пишет в исходящий gRPC-стрим.
+
+Доменные DTO для `Sender` — в `internal/model/outbound.go` (`OutboundUpsert`/`OutboundRemove`/`OutboundError`/`OutboundStats`); `Task` и `TaskKind` — в `internal/model/types.go`.
+
+Моки для всех трёх интерфейсов лежат в `internal/service/mocks/` и генерируются `minimock` через `go generate ./internal/service` (декларации — в `genmocks.go` под build tag `generate`). Тесты воркера используют именно эти моки. Транспорт пользуется тем же подходом — `internal/transport/mocks/ServiceMock`, см. секцию «Транспорт».
+
+## Storage (`internal/storage`)
+
+Реализация `service.TaskRepo` поверх `database/sql` + `modernc.org/sqlite`.
+
+- `sqlite.go` — `Storage` struct, `New(ctx, cfg, log)`, `Close()`. В конструкторе — открытие БД, `MaxOpenConns(1)`, набор PRAGMA (WAL/synchronous/busy_timeout/foreign_keys + temp_store/cache_size/mmap_size). Миграции **не применяются** — это делает goose CLI снаружи.
+- `storage.go` — методы интерфейса. Чтения (`PullPendingTasks`, `ListUserIDs`) — через `sqlscan.Select`; записи — `db.ExecContext`. Внутренний `taskRow` мапит INTEGER `received_at` ↔ `time.Time`.
+- `storage_test.go` — интеграционный тест против временного sqlite-файла; миграция применяется хелпером `applyInitMigration` (читает `migrations/00001_init.sql`, выдёргивает Up-секцию, выполняет).
+
+Семантика:
+- `SaveTask` идемпотентен: `INSERT ... ON CONFLICT(request_id) DO NOTHING`. Повтор той же таски при реконнекте безопасен.
+- `MarkDone`/`MarkFailed` для несуществующего/уже терминального `request_id` — `slog.Warn` + `nil`. Failed — терминально (не ретраится).
+- `ListUserIDs` возвращает DISTINCT `user_id` (один юзер может быть под несколькими `driver_type`).
+
+## Схема БД (`migrations/`)
+
+Миграции — отдельные пронумерованные SQL-файлы под `migrations/`, формат goose (`-- +goose Up` / `-- +goose Down`). Применяются `goose` CLI снаружи (`goose -dir migrations sqlite3 ./data/agent.db up`); код агента миграции не катит. Чтобы добавить миграцию — клади следующий пронумерованный `NNNNN_*.sql`.
+
+Текущий стейт (`00001_init.sql`) — две таблицы:
+
+- **`tasks`** — журнал входящих тасок от контрол-плейна. PK = `request_id` (даёт сквозную идемпотентность: повторный `SaveTask` с тем же id — `ON CONFLICT DO NOTHING`). Колонки: `user_id`, `driver_type`, `kind ∈ ('upsert','remove')`, `received_at`, и терминальные `done_at` / `failed_at` + `last_error`. Партиал-индекс `idx_tasks_pending` (`WHERE done_at IS NULL AND failed_at IS NULL`) — для горячего пути `PullPendingTasks`; терминальные таски (как done, так и failed) в индекс не попадают.
+- **`users`** — текущий состав юзеров на этом агенте, источник правды для sync-loop'а. Композитный PK `(user_id, driver_type)` — один и тот же `user_id` может жить под несколькими драйверами, если когда-нибудь появится не-Xray драйвер.
+
+Все timestamp'ы в БД — unix seconds (`INTEGER`), не ISO-строки.
 
 ## Полезные конвенции
 
-- Identity юзера в Xray = `user.ID` (UUID), переиспользуется как Xray `email`. Это форсится в `XrayDriver.toXrayUser`.
-- `driver_xray.protocol` обязан быть `vless` или `vmess`; `XrayDriver.toXrayUser` для остального вернёт ошибку.
-- Тесты — на `testify`. Слои service и transport покрыты табличными тестами с ручными моками (см. `internal/service/service_test.go`, `internal/transport/handlers_test.go`) — следуй этому стилю, не тащи отдельные мок-библиотеки.
+- Identity юзера в Xray = `userID` (UUID), email формируется как `userID + "@xray.com"`. Никогда не передавай в Xray API «голый» userID как email — иди через `emailFor`.
+- Драйвер работает **только с VLESS+Vision+REALITY**. Импорт `github.com/xtls/xray-core/proxy/vmess` в новом коде не должен появляться.
+- В свежем коде используй `log/slog` напрямую (`slog.Default()`, `*slog.Logger`); не заводи новые обёртки. `cmd/main.go` ставит JSON-handler в `slog.SetDefault`, уровень — `Info` для `env: prod`, `Debug` для `dev`/`local`.
+- Тесты — на `testify` (`assert` / `require`). Стиль — табличные тесты с table-driven кейсами; ручные моки писать только когда нет другого выхода (никаких отдельных мок-библиотек).
 - `go.mod` объявляет `go 1.25`; предпочитай современную стандартную библиотеку (`log/slog`, `context`, `errors.Is/As` и т.п.).
+
+## Снапшот Xray API
+
+Актуальные сигнатуры `proxyman.command` / `stats.command` / `vless.Account` / `protocol.User` / `serial.TypedMessage` лежат в `.claude/xray-api-snapshot.md`. Перед изменениями драйвера — сверяйся с ним, особенно с разделом «Pitfalls» (поле `Reset_` с подчёркиванием, формат `GetAllOnlineUsersResponse.Users`, и т.п.).
