@@ -25,8 +25,10 @@ func (d *Driver) AddUser(ctx context.Context, userID string) error {
 		return fmt.Errorf("add user: get inbound users: %w", err)
 	}
 
-	if len(existing.GetUsers()) > 0 {
-		return nil
+	for _, u := range existing.GetUsers() {
+		if u.GetEmail() == email {
+			return nil
+		}
 	}
 
 	xrayUser := &protocol.User{
